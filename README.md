@@ -1,9 +1,10 @@
 # Odiim 1D Stackup
 
-A Python desktop app for sketching a one-dimensional assembly, entering
-dimensions and tolerances, and calculating the minimum and maximum functional
-gap. Assembly clearance, contact and available translation are part of the
-same calculation.
+A Python desktop sketch editor for drawing custom part profiles, connected
+lines and circles, dimensioning their features, and calculating a functional
+gap along **one axis**. Nominal dimensions drive the sketch's x-positions;
+tolerances, contacts and assembly movement determine its minimum and maximum
+gap. Version **1.1.0** adds freeform outlines and movable dimension annotations.
 
 ![Odiim 1D Stackup desktop interface](assets/preview.png)
 
@@ -32,20 +33,34 @@ package it separately as `python3-tk`. The app runs offline after installation.
 
 ## Sketch an assembly
 
-1. Click **New** and choose **Body**.
-2. Click the left and right face positions. Enter a name, nominal width, lower
-   deviation and upper deviation. Choose **Housing / slot** for a cavity.
-3. Add more bodies or individual face **Points**.
-4. Select **Dimension**, then click its **From** and **To** points. You can also
-   use **Add** in the **Dims** tab and choose points from dropdowns.
-5. Locate the parts with dimensions, face contacts, placement ranges or
-   **Fit / float**. Drawing rectangles next to each other does not create a
-   contact automatically.
-6. Select **Gap**, then click the two faces. Define optional required limits.
-7. Switch **Assembly pose** between the reference, minimum-gap and maximum-gap
+1. Click **New**, choose **Profile**, and click your part's vertices. Draw
+   stepped, notched or other custom outlines. Click the first vertex to close,
+   or press **Enter / Finish sketch**. Choose **Open path** in the properties
+   dialog for an open outline. **Backspace** removes the last draft vertex;
+   **Escape** cancels the draft.
+2. Add more profiles. **Line** creates a segment between two points; clicking
+   an existing feature deliberately connects its endpoint. **Circle** takes
+   two clicks at its left and right edges and adds a center feature.
+   **Rectangle** retains the original body / housing tool. **Point** adds an
+   individual feature.
+3. Select **Dimension**, then click any **From** and **To** vertices, vertical
+   faces or circle features. Enter the nominal signed horizontal dimension,
+   lower deviation and upper deviation. **Click again to place the dimension
+   annotation**. In **Select** mode, drag a label to arrange it or double-click
+   it to edit its size and tolerances. **Add** in **Dims** also provides feature
+   dropdowns. You choose the dimensioning scheme: overall, chained, or from a
+   common feature. Inconsistent overconstraints are reported.
+4. Locate the parts with contacts, placement ranges or **Fit / float**.
+   Dimension an internal shoulder or hole relative to its own part's features
+   so it follows that part's assembly movement. Separate profiles create
+   independent part features even when initially drawn at the same position.
+5. Select **Gap**, then click its two features. The measured features may be
+   internal shoulders or circle edges, rather than a part's outer ends.
+   Define optional required limits.
+6. Switch **Assembly pose** between the reference, minimum-gap and maximum-gap
    assemblies to see the actual positions producing each result.
 
-Double-click a dimension, point, body or fit to edit it. Right-click a point
+Double-click a dimension, point, shape or fit to edit it. Right-click a point
 to set datum **A**. Use the wheel to zoom, middle-drag to pan, and **Fit view**
 to recenter. Undo/redo uses **Ctrl+Z / Ctrl+Y**.
 
@@ -53,6 +68,42 @@ All numeric inputs use **mm**. Both a decimal point and decimal comma are
 accepted. The canvas y-coordinate is layout only: this is a **1D x-axis**
 calculation, not a 2D geometric solver. Dimensional values are entered
 explicitly; sketch pixels do not replace a dimensional specification.
+
+### Sketch geometry and dimensions
+
+Vertices drawn at the same x-coordinate within a profile share an x-column.
+This keeps a vertical face vertical and lets you dimension either of its
+vertices. The circle center is constrained to be midway between its left and
+right edges. Dimensioning the diameter gives half its variation to a radius;
+dimensioning a radius drives twice that variation into the diameter.
+Dimension the center's position to locate a hole on its part.
+
+These geometric relationships do not add hidden manufacturing tolerances.
+Unconnected or insufficiently dimensioned gap features remain unbounded.
+The outline is drawn in two screen directions, while **all analytical
+dimensions and movement remain along x**. A sloping line's dimension is its
+horizontal projection; rotations and angular variation are not solved.
+Fit constraints apply to the four selected faces; the app does not infer
+contacts or check 2D collision from the complete silhouettes.
+
+Changing a dimension updates the reference sketch and gap analysis. Moving
+an annotation changes only the presentation. Saved files and HTML / SVG
+exports preserve the custom outlines and annotation positions.
+
+The **Stepped part + hole** example measures an internal shoulder in a
+40 ±0.2 mm frame. Its part width is 34 ±0.1 mm and its shoulder is
+24 ±0.05 mm from the part's left face:
+
+| Assembly condition | Minimum shoulder gap | Maximum shoulder gap |
+| --- | ---: | ---: |
+| Free | 9.850 mm | 16.250 mm |
+| Left seated | 15.750 mm | 16.250 mm |
+| Right seated | 9.850 mm | 10.150 mm |
+| Centered | 12.800 mm | 13.200 mm |
+
+The free minimum is `minimum part width − maximum shoulder offset`.
+The free maximum is `maximum frame width − minimum shoulder offset`.
+The solver keeps those dimensions and the shared assembly position coupled.
 
 ### Dimension types
 
@@ -142,6 +193,8 @@ RSS approximation or assembly failure-rate estimate.
 ## Save and export
 
 - **Save** creates a portable `.stackup.json` project. Writes are atomic.
+  Version 1.1 reads older schema-1 projects and saves schema 2, which includes
+  custom outlines and dimension placement. Use the updated app for new files.
 - **Export report → HTML** produces a self-contained report with all three
   assembly sketches, extrema, dimensions, fit clearance and movement.
   Open it in a browser and print to PDF if desired.
@@ -149,9 +202,9 @@ RSS approximation or assembly failure-rate estimate.
   movement and result notes.
 - **SVG** exports the currently displayed vector sketch.
 
-Five examples are available in the app and in the `examples/` folder:
-floating block, centered block, serial chain, mounting float, and a partial
-fit/interference case.
+Six examples are available in the app and in the `examples/` folder:
+stepped part with a hole, floating block, centered block, serial chain,
+mounting float, and a partial fit/interference case.
 
 ## Command-line analysis
 
@@ -174,7 +227,9 @@ python -m unittest discover -s tests -v
 Tests check signed and asymmetric chains, shared-face cancellation,
 clearance-dependent float, contact and centered conditions, internal features,
 reference-pose changes, interference, unbounded and inconsistent models,
-project persistence, exports, and an interactive sketch/edit/undo workflow.
+custom vertical faces, circle diameter / radius coupling, connected lines,
+legacy project migration, persistence, exports, annotation placement and
+interactive sketch/edit/undo workflows.
 The GUI test requires a display; it is skipped on a headless machine.
 
 SciPy's HiGHS linear-programming solver computes the gap extrema. Feature
