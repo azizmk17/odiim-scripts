@@ -1,0 +1,293 @@
+{
+  "name": "Stepped part with a hole",
+  "points": [
+    {
+      "id": "P1",
+      "name": "Frame v1",
+      "x": 0,
+      "y": 8
+    },
+    {
+      "id": "P2",
+      "name": "Frame v2",
+      "x": 40,
+      "y": 8
+    },
+    {
+      "id": "P3",
+      "name": "Frame v3",
+      "x": 40,
+      "y": 28
+    },
+    {
+      "id": "P4",
+      "name": "Frame v4",
+      "x": 44,
+      "y": 28
+    },
+    {
+      "id": "P5",
+      "name": "Frame v5",
+      "x": 44,
+      "y": 4
+    },
+    {
+      "id": "P6",
+      "name": "Frame v6",
+      "x": -4,
+      "y": 4
+    },
+    {
+      "id": "P7",
+      "name": "Frame v7",
+      "x": -4,
+      "y": 28
+    },
+    {
+      "id": "P8",
+      "name": "Frame v8",
+      "x": 0,
+      "y": 28
+    },
+    {
+      "id": "P9",
+      "name": "Stepped part v1",
+      "x": 3,
+      "y": 12
+    },
+    {
+      "id": "P10",
+      "name": "Stepped part v2",
+      "x": 37,
+      "y": 12
+    },
+    {
+      "id": "P11",
+      "name": "Stepped part v3",
+      "x": 37,
+      "y": 20
+    },
+    {
+      "id": "P12",
+      "name": "Stepped part v4",
+      "x": 27,
+      "y": 20
+    },
+    {
+      "id": "P13",
+      "name": "Stepped part v5",
+      "x": 27,
+      "y": 25
+    },
+    {
+      "id": "P14",
+      "name": "Stepped part v6",
+      "x": 3,
+      "y": 25
+    },
+    {
+      "id": "P15",
+      "name": "Hole left",
+      "x": 15,
+      "y": 17.0
+    },
+    {
+      "id": "P16",
+      "name": "Hole center",
+      "x": 17.0,
+      "y": 17.0
+    },
+    {
+      "id": "P17",
+      "name": "Hole right",
+      "x": 19,
+      "y": 17.0
+    }
+  ],
+  "bodies": [],
+  "dimensions": [
+    {
+      "id": "D1",
+      "name": "Slot width",
+      "start": "P1",
+      "end": "P2",
+      "nominal": 40,
+      "lower": -0.2,
+      "upper": 0.2,
+      "kind": "size",
+      "annotation_y": -3,
+      "label_offset": 0.0
+    },
+    {
+      "id": "D2",
+      "name": "Part width",
+      "start": "P9",
+      "end": "P10",
+      "nominal": 34,
+      "lower": -0.1,
+      "upper": 0.1,
+      "kind": "size",
+      "annotation_y": 33,
+      "label_offset": 0.0
+    },
+    {
+      "id": "D3",
+      "name": "Shoulder location",
+      "start": "P9",
+      "end": "P12",
+      "nominal": 24,
+      "lower": -0.05,
+      "upper": 0.05,
+      "kind": "size",
+      "annotation_y": 44,
+      "label_offset": 0.0
+    },
+    {
+      "id": "D4",
+      "name": "Left wall",
+      "start": "P1",
+      "end": "P6",
+      "nominal": -4,
+      "lower": 0,
+      "upper": 0,
+      "kind": "size",
+      "annotation_y": 3,
+      "label_offset": -5
+    },
+    {
+      "id": "D5",
+      "name": "Right wall",
+      "start": "P2",
+      "end": "P4",
+      "nominal": 4,
+      "lower": 0,
+      "upper": 0,
+      "kind": "size",
+      "annotation_y": 3,
+      "label_offset": 6
+    },
+    {
+      "id": "D6",
+      "name": "Hole center location",
+      "start": "P9",
+      "end": "P16",
+      "nominal": 14,
+      "lower": -0.05,
+      "upper": 0.05,
+      "kind": "size",
+      "annotation_y": -10,
+      "label_offset": 0.0
+    },
+    {
+      "id": "D7",
+      "name": "Hole diameter",
+      "start": "P15",
+      "end": "P17",
+      "nominal": 4,
+      "lower": -0.1,
+      "upper": 0.1,
+      "kind": "size",
+      "annotation_y": -17,
+      "label_offset": 5
+    }
+  ],
+  "fits": [
+    {
+      "id": "F1",
+      "name": "Part in frame",
+      "slot_left": "P1",
+      "slot_right": "P2",
+      "body_left": "P9",
+      "body_right": "P10",
+      "mode": "free"
+    }
+  ],
+  "datum": "P1",
+  "gap": {
+    "start": "P12",
+    "end": "P2",
+    "name": "Shoulder gap",
+    "minimum_allowed": 9.8,
+    "maximum_allowed": 16.3
+  },
+  "schema_version": 2,
+  "sketches": [
+    {
+      "id": "S1",
+      "name": "Frame",
+      "vertices": [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "P5",
+        "P6",
+        "P7",
+        "P8"
+      ],
+      "closed": true,
+      "color": "#64748b",
+      "kind": "profile",
+      "columns": [
+        [
+          "P1",
+          "P8"
+        ],
+        [
+          "P2",
+          "P3"
+        ],
+        [
+          "P4",
+          "P5"
+        ],
+        [
+          "P6",
+          "P7"
+        ]
+      ]
+    },
+    {
+      "id": "S2",
+      "name": "Stepped part",
+      "vertices": [
+        "P9",
+        "P10",
+        "P11",
+        "P12",
+        "P13",
+        "P14"
+      ],
+      "closed": true,
+      "color": "#2563eb",
+      "kind": "profile",
+      "columns": [
+        [
+          "P9",
+          "P14"
+        ],
+        [
+          "P10",
+          "P11"
+        ],
+        [
+          "P12",
+          "P13"
+        ]
+      ]
+    },
+    {
+      "id": "S3",
+      "name": "Hole",
+      "vertices": [
+        "P15",
+        "P16",
+        "P17"
+      ],
+      "closed": true,
+      "color": "#0891b2",
+      "kind": "circle",
+      "columns": []
+    }
+  ]
+}
