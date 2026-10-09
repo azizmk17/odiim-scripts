@@ -1,0 +1,116 @@
+{
+  "name": "Three-part chain",
+  "points": [
+    {
+      "id": "P1",
+      "name": "Datum",
+      "x": 0,
+      "y": 20
+    },
+    {
+      "id": "P2",
+      "name": "A right",
+      "x": 20,
+      "y": 20
+    },
+    {
+      "id": "P3",
+      "name": "B right",
+      "x": 35,
+      "y": 20
+    },
+    {
+      "id": "P4",
+      "name": "C right",
+      "x": 45,
+      "y": 20
+    },
+    {
+      "id": "P5",
+      "name": "Housing end",
+      "x": 50,
+      "y": 20
+    }
+  ],
+  "bodies": [
+    {
+      "id": "B1",
+      "name": "Part A",
+      "left": "P1",
+      "right": "P2",
+      "height": 6,
+      "color": "#2563eb",
+      "hollow": false
+    },
+    {
+      "id": "B2",
+      "name": "Part B",
+      "left": "P2",
+      "right": "P3",
+      "height": 6,
+      "color": "#8b5cf6",
+      "hollow": false
+    },
+    {
+      "id": "B3",
+      "name": "Part C",
+      "left": "P3",
+      "right": "P4",
+      "height": 6,
+      "color": "#0891b2",
+      "hollow": false
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "D1",
+      "name": "Housing length",
+      "start": "P1",
+      "end": "P5",
+      "nominal": 50,
+      "lower": -0.2,
+      "upper": 0.2,
+      "kind": "size"
+    },
+    {
+      "id": "D2",
+      "name": "A length",
+      "start": "P1",
+      "end": "P2",
+      "nominal": 20,
+      "lower": -0.1,
+      "upper": 0.1,
+      "kind": "size"
+    },
+    {
+      "id": "D3",
+      "name": "B length",
+      "start": "P2",
+      "end": "P3",
+      "nominal": 15,
+      "lower": -0.05,
+      "upper": 0.05,
+      "kind": "size"
+    },
+    {
+      "id": "D4",
+      "name": "C length",
+      "start": "P3",
+      "end": "P4",
+      "nominal": 10,
+      "lower": -0.1,
+      "upper": 0.1,
+      "kind": "size"
+    }
+  ],
+  "fits": [],
+  "datum": "P1",
+  "gap": {
+    "start": "P4",
+    "end": "P5",
+    "name": "End gap",
+    "minimum_allowed": 4,
+    "maximum_allowed": 6
+  },
+  "schema_version": 1
+}
