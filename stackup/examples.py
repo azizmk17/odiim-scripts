@@ -59,7 +59,39 @@ def fit_risk() -> Project:
     return project
 
 
+def stepped_part(mode: str = "free") -> Project:
+    """An internal shoulder on a freely moving custom outline.
+
+    Free shoulder gap: [34-.1 - (24+.05), 40+.2 - (24-.05)]
+    = [9.85, 16.25]. This is not the gap from the part's outer end.
+    """
+    project = Project(name="Stepped part with a hole")
+    frame = project.add_sketch([(0, 8), (40, 8), (40, 28), (44, 28), (44, 4),
+                               (-4, 4), (-4, 28), (0, 28)], name="Frame", color="#64748b")
+    part = project.add_sketch([(3, 12), (37, 12), (37, 20), (27, 20), (27, 25), (3, 25)],
+                              name="Stepped part")
+    hole = project.add_sketch([(15, 17), (19, 17)], name="Hole", kind="circle", color="#0891b2")
+    sl, sr = frame.vertices[:2]
+    bl, br = part.vertices[:2]
+    shoulder = part.vertices[3]
+    hl, hc, hr = hole.vertices
+    project.dimensions = [
+        Dimension("D1", "Slot width", sl, sr, 40, -.2, .2, annotation_y=-3),
+        Dimension("D2", "Part width", bl, br, 34, -.1, .1, annotation_y=33),
+        Dimension("D3", "Shoulder location", bl, shoulder, 24, -.05, .05, annotation_y=44),
+        Dimension("D4", "Left wall", sl, frame.vertices[5], -4, 0, 0, annotation_y=3, label_offset=-5),
+        Dimension("D5", "Right wall", sr, frame.vertices[3], 4, 0, 0, annotation_y=3, label_offset=6),
+        Dimension("D6", "Hole center location", bl, hc, 14, -.05, .05, annotation_y=-10),
+        Dimension("D7", "Hole diameter", hl, hr, 4, -.1, .1, annotation_y=-17, label_offset=5),
+    ]
+    project.fits = [Fit("F1", "Part in frame", sl, sr, bl, br, mode)]
+    project.gap = Gap(shoulder, sr, "Shoulder gap", 9.8, 16.3)
+    project.validate()
+    return project
+
+
 EXAMPLES = {
+    "Stepped part + hole": stepped_part,
     "Floating block": floating_block,
     "Centered block": lambda: floating_block("centered"),
     "Three-part chain": serial_chain,

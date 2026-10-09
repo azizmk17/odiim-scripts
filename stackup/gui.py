@@ -11,10 +11,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
-from .drawing import scene, scene_bounds, svg_sketch
-from .examples import EXAMPLES, floating_block
+from .drawing import dimension_y, scene, scene_bounds, svg_sketch
+from .examples import EXAMPLES, stepped_part
 from .io import export_csv, export_html, load_project, number, save_project, _atomic_text
-from .model import Body, Dimension, Fit, Gap, Point, Project
+from .model import Body, Dimension, Fit, Gap, Point, Project, Sketch
 from .solver import Analysis, analyze
 
 INK = "#0f172a"
@@ -22,6 +22,7 @@ MUTED = "#64748b"
 BLUE = "#2563eb"
 BG = "#f1f5f9"
 COLORS = ["#2563eb", "#8b5cf6", "#0891b2", "#ea580c", "#16a34a"]
+PALETTE = dict(zip(["Blue", "Purple", "Teal", "Orange", "Green", "Slate"], COLORS + ["#64748b"]))
 KINDS = {"Manufacturing size": "size", "Assembly placement / float": "placement", "Face contact": "contact"}
 MODES = {"Free float": "free", "Left face in contact": "left", "Right face in contact": "right", "Centered (equal gaps)": "centered"}
 
@@ -150,7 +151,9 @@ class DimensionDialog(FormDialog):
         kind = KINDS[self.text("kind")]
         values = (0.0, 0.0, 0.0) if kind == "contact" else (self.float("nominal"), self.float("lower"), self.float("upper"))
         item = Dimension(self.existing.id if self.existing else self.project.next_id("D"), self.text("name") or "Dimension",
-                         self.point_id("start"), self.point_id("end"), *values, kind)
+                         self.point_id("start"), self.point_id("end"), *values, kind,
+                         self.existing.annotation_y if self.existing else None,
+                         self.existing.label_offset if self.existing else 0.0)
         trial = self.project.copy()
         trial.dimensions = [d for d in trial.dimensions if d.id != item.id] + [item]
         trial.validate()
@@ -182,7 +185,9 @@ class BodyDialog(FormDialog):
         body = Body(self.existing.id if self.existing else self.project.next_id("B"), name, self.left, self.right, height,
                     self.existing.color if self.existing else COLORS[len(self.project.bodies) % len(COLORS)], self.text("type") == "Housing / slot")
         dimension = Dimension(self.old_dimension.id if self.old_dimension else self.project.next_id("D"),
-                              self.old_dimension.name if self.old_dimension else name + " width", self.left, self.right, width, low, high)
+                              self.old_dimension.name if self.old_dimension else name + " width", self.left, self.right, width, low, high,
+                              annotation_y=self.old_dimension.annotation_y if self.old_dimension else None,
+                              label_offset=self.old_dimension.label_offset if self.old_dimension else 0)
         return body, dimension
 
 
@@ -198,8 +203,16 @@ class FitDialog(FormDialog):
         housing = next((body for body in self.project.bodies if body.hollow), None)
         moving = next((body for body in self.project.bodies if not body.hollow), None)
         ids = [p.id for p in self.project.points]
-        defaults = [housing.left if housing else ids[0], housing.right if housing else ids[1],
-                    moving.left if moving else ids[2], moving.right if moving else ids[3]]
+        if not housing and len(self.project.sketches) >= 2:
+            def faces(sketch):
+                ordered = sorted(sketch.vertices, key=lambda point_id: self.project.point(point_id).x)
+                return ordered[0], ordered[-1]
+            sl, sr = faces(self.project.sketches[0])
+            bl, br = faces(self.project.sketches[1])
+            defaults = [sl, sr, bl, br]
+        else:
+            defaults = [housing.left if housing else ids[0], housing.right if housing else ids[1],
+                        moving.left if moving else ids[2], moving.right if moving else ids[3]]
         for key, label, default in zip(("slot_left", "slot_right", "body_left", "body_right"),
                                         ("Slot left limit", "Slot right limit", "Moving left face", "Moving right face"), defaults):
             self.point_combo(key, label, getattr(old, key) if old else default)
@@ -253,6 +266,28 @@ class PointDialog(FormDialog):
         return Point(self.point.id, self.text("name") or self.point.id, self.float("x"), self.float("y"))
 
 
+class SketchDialog(FormDialog):
+    def __init__(self, parent, project, sketch: Sketch):
+        self.sketch = sketch
+        super().__init__(parent, "Sketch properties", project)
+
+    def build(self):
+        self.note("Add horizontal dimensions between any vertices or circle features after drawing. Vertical faces share x. A circle has left, center and right features; its center stays midway between its edges.")
+        self.entry("name", "Part / shape name", self.sketch.name)
+        current = next((name for name, color in PALETTE.items() if color == self.sketch.color), "Blue")
+        self.combo("color", "Color", list(PALETTE), current)
+        if self.sketch.kind == "profile":
+            self.combo("outline", "Outline", ["Closed profile", "Open path"],
+                       "Closed profile" if self.sketch.closed else "Open path")
+
+    def value(self):
+        closed = self.text("outline") == "Closed profile" if self.sketch.kind == "profile" else self.sketch.closed
+        if closed and self.sketch.kind == "profile" and len(self.sketch.vertices) < 3:
+            raise ValueError("A closed profile needs at least three vertices. Choose Open path for two.")
+        return replace(self.sketch, name=self.text("name") or self.sketch.id,
+                       color=PALETTE[self.text("color")], closed=closed)
+
+
 class StackupApp(tk.Tk):
     def __init__(self, project: Project | None = None):
         super().__init__()
@@ -260,7 +295,7 @@ class StackupApp(tk.Tk):
         self.geometry(f"{max(1080, min(1440, self.winfo_screenwidth() - 40))}x{max(720, min(900, self.winfo_screenheight() - 70))}")
         self.minsize(1080, 720)
         self.configure(background=BG)
-        self.project = project or floating_block()
+        self.project = project if project is not None else stepped_part()
         self.file_path: Path | None = None
         self.saved_state = json.dumps(self.project.to_dict(), sort_keys=True)
         self.undo_stack: list[Project] = []
@@ -271,12 +306,16 @@ class StackupApp(tk.Tk):
         self.future = None
         self.pending_analysis = False
         self.analysis_timer = None
+        self.poll_timer = None
         self.closing = False
         self.scale, self.origin_x, self.origin_y = 12.0, 110.0, 240.0
         self.mode = tk.StringVar(value="select")
         self.view = tk.StringVar(value="Reference pose")
         self.snap = tk.BooleanVar(value=True)
         self.tool_start = None
+        self.draft: list[tuple[float, float, str | None]] = []
+        self.cursor_world = None
+        self.pending_annotation = None
         self.drag = None
         self.pan_start = None
         self.selected: tuple[str, str] | None = None
@@ -286,7 +325,7 @@ class StackupApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.close_app)
         self.refresh()
         self.after(120, self.fit_view)
-        self.after(60, self.poll_analysis)
+        self.poll_timer = self.after(60, self.poll_analysis)
 
     @property
     def dirty(self):
@@ -332,7 +371,7 @@ class StackupApp(tk.Tk):
         ttk.Button(filebar, text="Undo", command=self.undo).pack(side="left", padx=(18, 3))
         ttk.Button(filebar, text="Redo", command=self.redo).pack(side="left", padx=3)
         ttk.Label(filebar, text="Example:", foreground=MUTED).pack(side="left", padx=(18, 6))
-        self.example_var = tk.StringVar(value="Floating block")
+        self.example_var = tk.StringVar(value="Stepped part + hole")
         examples = ttk.Combobox(filebar, textvariable=self.example_var, values=list(EXAMPLES), state="readonly", width=20)
         examples.pack(side="left")
         examples.bind("<<ComboboxSelected>>", lambda _: self.load_example())
@@ -356,8 +395,8 @@ class StackupApp(tk.Tk):
         columns = {"dimension": (["name", "nominal", "tol"], ["Name", "Nominal", "Low / high"]),
                    "fit": (["name", "mode"], ["Fit", "Condition"]),
                    "point": (["id", "name"], ["ID", "Face / point"]),
-                   "body": (["id", "name"], ["ID", "Sketch body"])}
-        for kind, title in [("dimension", "Dims"), ("fit", "Fits"), ("point", "Points"), ("body", "Bodies")]:
+                   "body": (["id", "name"], ["ID", "Part / shape"])}
+        for kind, title in [("dimension", "Dims"), ("fit", "Fits"), ("point", "Points"), ("body", "Shapes")]:
             frame = ttk.Frame(notebook, style="White.TFrame")
             notebook.add(frame, text=title)
             names, headings = columns[kind]
@@ -383,19 +422,25 @@ class StackupApp(tk.Tk):
                 ttk.Button(frame, text="Use selected point as datum A", command=self.set_datum).pack(fill="x", pady=5)
         self.selection_label = ttk.Label(left, text="Double-click an item to edit it.", style="Note.TLabel", wraplength=280)
         self.selection_label.pack(anchor="w", pady=(14, 5))
-        ttk.Label(left, text="Dimensions are signed: To − From.\nBody shapes alone do not locate parts.", style="Note.TLabel", wraplength=280).pack(anchor="w", pady=5)
+        ttk.Label(left, text="Dimensions are signed: To − From.\nChoose the features that define your part.\nDrag dimension labels to arrange the drawing.", style="Note.TLabel", wraplength=280).pack(anchor="w", pady=5)
 
         toolbar = ttk.Frame(center, padding=9)
         toolbar.pack(fill="x")
-        for name, key in [("Select", "select"), ("Point", "point"), ("Body", "body"), ("Dimension", "dimension"), ("Gap", "gap")]:
+        for name, key in [("Select", "select"), ("Point", "point"), ("Line", "line"), ("Profile", "profile"), ("Circle", "circle"), ("Rectangle", "body")]:
             ttk.Radiobutton(toolbar, text=name, value=key, variable=self.mode, style="Tool.TRadiobutton", command=self.change_tool).pack(side="left", padx=1)
-        ttk.Button(toolbar, text="Fit / float", command=self.add_fit).pack(side="left", padx=5)
-        ttk.Button(toolbar, text="Fit view", command=self.fit_view).pack(side="right")
+        dimensionbar = ttk.Frame(center, padding=(9, 0, 9, 9))
+        dimensionbar.pack(fill="x")
+        for name, key in [("Dimension", "dimension"), ("Gap", "gap")]:
+            ttk.Radiobutton(dimensionbar, text=name, value=key, variable=self.mode, style="Tool.TRadiobutton", command=self.change_tool).pack(side="left", padx=1)
+        ttk.Button(dimensionbar, text="Fit / float", command=self.add_fit).pack(side="left", padx=5)
+        ttk.Button(dimensionbar, text="Finish sketch ↵", command=self.finish_sketch).pack(side="left", padx=1)
+        ttk.Button(dimensionbar, text="Fit view", command=self.fit_view).pack(side="right")
         self.canvas = tk.Canvas(center, background="#ffffff", highlightthickness=0, cursor="arrow")
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda _: self.draw())
         self.canvas.bind("<Button-1>", self.canvas_down)
         self.canvas.bind("<B1-Motion>", self.canvas_move)
+        self.canvas.bind("<Motion>", self.canvas_hover)
         self.canvas.bind("<ButtonRelease-1>", self.canvas_up)
         self.canvas.bind("<Double-Button-1>", self.canvas_double)
         self.canvas.bind("<Button-3>", self.context_menu)
@@ -442,6 +487,8 @@ class StackupApp(tk.Tk):
         for key, callback in [("<Control-s>", self.save), ("<Control-o>", self.open_project), ("<Control-n>", self.new_project), ("<Control-z>", self.undo), ("<Control-y>", self.redo), ("<Escape>", self.cancel_tool)]:
             self.bind(key, lambda _, fn=callback: fn())
         self.canvas.bind("<Delete>", lambda _: self.delete_selected())
+        self.bind("<Return>", lambda _: self.finish_sketch())
+        self.bind("<BackSpace>", lambda _: self.remove_draft_vertex())
 
     def checkpoint(self):
         self.undo_stack.append(self.project.copy())
@@ -451,7 +498,7 @@ class StackupApp(tk.Tk):
     def refresh(self, *, recalculate=True):
         self.project_label.configure(text=self.project.name)
         self.title(f"{'* ' if self.dirty else ''}{self.project.name} · Odiim 1D Stackup")
-        groups = {"point": self.project.points, "body": self.project.bodies, "dimension": self.project.dimensions, "fit": self.project.fits}
+        groups = {"point": self.project.points, "body": self.project.bodies + self.project.sketches, "dimension": self.project.dimensions, "fit": self.project.fits}
         for kind, tree in self.trees.items():
             selection = tree.selection()
             tree.delete(*tree.get_children())
@@ -490,6 +537,7 @@ class StackupApp(tk.Tk):
         self.future = self.executor.submit(lambda: (revision, analyze(snapshot)))
 
     def poll_analysis(self):
+        self.poll_timer = None
         if self.closing:
             return
         if self.future is not None and self.future.done():
@@ -506,7 +554,7 @@ class StackupApp(tk.Tk):
             if self.pending_analysis:
                 self.pending_analysis = False
                 self.start_analysis()
-        self.after(60, self.poll_analysis)
+        self.poll_timer = self.after(60, self.poll_analysis)
 
     def show_result(self):
         result = self.result
@@ -552,7 +600,8 @@ class StackupApp(tk.Tk):
         if result.conflicts:
             self.result_text.insert("end", "Conflicting conditions:\n" + "\n".join("• " + item for item in result.conflicts), "risk")
         self.result_text.configure(state="disabled")
-        self.status.set("Wheel: zoom · Middle-drag: pan · Double-click: edit · Right-click a point: datum / edit / delete")
+        if not self.draft and self.pending_annotation is None and self.tool_start is None:
+            self.status.set("Draw: Profile / Line / Circle · Dimension any features · Drag labels · Wheel: zoom · Middle-drag: pan")
 
     def display_positions(self):
         if self.result:
@@ -600,6 +649,15 @@ class StackupApp(tk.Tk):
                 canvas.create_line(*coords, fill=stroke or MUTED, width=shape.width + (1 if selected else 0), dash=(5, 4) if shape.dashed else (), arrow="both" if shape.arrow else "none", arrowshape=(6, 7, 3), tags=(tag,))
             elif shape.kind == "rectangle":
                 canvas.create_rectangle(*coords, fill=shape.fill, outline=stroke, width=shape.width + (1 if selected else 0), tags=(tag,))
+            elif shape.kind in ("polygon", "polyline"):
+                if shape.kind == "polygon":
+                    color = shape.stroke
+                    tint = "#" + "".join(f"{round(255 * .9 + int(color[i:i+2], 16) * .1):02x}" for i in (1, 3, 5))
+                    canvas.create_polygon(*coords, fill=tint, outline=stroke, width=shape.width + (1 if selected else 0), tags=(tag,))
+                else:
+                    canvas.create_line(*coords, fill=stroke, width=shape.width + (1 if selected else 0), tags=(tag,))
+            elif shape.kind == "ellipse":
+                canvas.create_oval(*coords, fill="", outline=stroke, width=shape.width + (1 if selected else 0), tags=(tag,))
             elif shape.kind == "oval":
                 x, y = (coords[0] + coords[2]) / 2, (coords[1] + coords[3]) / 2
                 radius = 5 if selected or tag == "point:" + str(self.tool_start) else 4
@@ -608,12 +666,30 @@ class StackupApp(tk.Tk):
                 canvas.create_text(*coords, text=shape.text, fill=shape.fill, font=(self.font, shape.size, "bold" if shape.bold else "normal"), tags=(tag,))
         if not self.project.points:
             canvas.create_text(width / 2, height / 2 - 15, text="Sketch your 1D assembly", fill=INK, font=(self.font, 22, "bold"))
-            canvas.create_text(width / 2, height / 2 + 23, text="Choose Body and click its left and right faces.\nThen add dimensions, a fit and the gap to measure.", fill=MUTED, font=(self.font, 11), justify="center")
+            if not self.draft:
+                canvas.create_text(width / 2, height / 2 + 23, text="Choose Profile and click your part's vertices.\nFinish with Enter, then dimension its features and pick a gap.", fill=MUTED, font=(self.font, 11), justify="center")
         if self.mode.get() == "body" and isinstance(self.tool_start, tuple):
             x, y = self.tool_start
             datum = self.project.point(self.project.datum).x if self.project.points else 0
             sx, sy = self.screen(x - datum, y)
             canvas.create_oval(sx - 6, sy - 6, sx + 6, sy + 6, outline=BLUE, width=2)
+        if self.draft:
+            datum = self.project.point(self.project.datum).x if self.project.points else 0
+            draft = [self.screen(x - datum, y) for x, y, _ in self.draft]
+            if self.cursor_world:
+                draft.append(self.screen(self.cursor_world[0] - datum, self.cursor_world[1]))
+            if len(draft) > 1:
+                if self.mode.get() == "circle":
+                    left, right = sorted((draft[0][0], draft[-1][0]))
+                    cy = (draft[0][1] + draft[-1][1]) / 2
+                    radius = (right - left) / 2
+                    canvas.create_oval(left, cy - radius, right, cy + radius, outline=BLUE, dash=(4, 3), width=2)
+                else:
+                    canvas.create_line(*[value for pair in draft for value in pair], fill=BLUE, dash=(4, 3), width=2)
+            for index, (sx, sy) in enumerate(draft[:len(self.draft)]):
+                canvas.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, fill="white", outline=BLUE, width=2)
+                if index == 0 and self.mode.get() == "profile":
+                    canvas.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, outline=BLUE, dash=(2, 2))
         if self.result and self.result.status not in ("incomplete", "invalid") and not self.display_positions():
             canvas.create_text(width / 2, 40, text="Pose unavailable — showing the requested sketch.", fill="#b45309", font=(self.font, 11, "bold"))
 
@@ -648,7 +724,17 @@ class StackupApp(tk.Tk):
 
     def change_tool(self):
         self.tool_start = None
-        instructions = {"select": "Select a point or body; drag to request a nominal pose or adjust layout.", "point": "Click to add a face point. Connect it with dimensions before measuring a gap.", "body": "Click the left face, then the right face. Enter the width and tolerances.", "dimension": "Click the FROM point, then the TO point. Dimension = x(To) − x(From).", "gap": "Click the FROM face, then the TO face of the functional gap."}
+        self.draft.clear()
+        self.cursor_world = None
+        self.pending_annotation = None
+        instructions = {"select": "Drag a shape or feature to adjust its reference pose. Drag a dimension label to arrange it.",
+                        "point": "Click to add a feature. Connect it with dimensions before measuring a gap.",
+                        "body": "Click the left face, then the right face. Enter the rectangle width and tolerances.",
+                        "line": "Click two endpoints. Click an existing point to connect the line to that feature.",
+                        "profile": "Click your part's vertices. Click the first vertex to close, or Enter / Finish sketch. Backspace removes the last vertex.",
+                        "circle": "Click the left and right edges of the circle. Dimension its diameter, radius or center position afterwards.",
+                        "dimension": "Click any FROM feature, then any TO feature. Enter nominal and tolerances, then click to place its label.",
+                        "gap": "Click the FROM feature, then the TO feature of the functional gap."}
         self.status.set(instructions[self.mode.get()])
         self.canvas.configure(cursor="arrow" if self.mode.get() == "select" else "crosshair")
         self.draw()
@@ -656,6 +742,49 @@ class StackupApp(tk.Tk):
     def cancel_tool(self):
         self.mode.set("select")
         self.change_tool()
+
+    def canvas_hover(self, event):
+        if self.draft:
+            self.cursor_world = self.world(event.x, event.y)
+            self.draw()
+
+    def remove_draft_vertex(self):
+        if self.draft:
+            self.draft.pop()
+            self.draw()
+
+    def finish_sketch(self, *, closed=None):
+        mode = self.mode.get()
+        if mode not in ("profile", "line", "circle") or not self.draft:
+            return
+        if len(self.draft) < 2 or (closed is True and len(self.draft) < 3):
+            self.status.set("Add more vertices before finishing this outline.")
+            return
+        trial = self.project.copy()
+        name = {"profile": "Part", "line": "Line", "circle": "Circle"}[mode] + " " + trial.next_id("S")
+        try:
+            sketch = trial.add_sketch([(x, y) for x, y, _ in self.draft], name=name, kind=mode,
+                                      closed=(len(self.draft) >= 3) if closed is None else closed,
+                                      color=COLORS[len(trial.sketches) % len(COLORS)],
+                                      reuse=[ref for _, _, ref in self.draft] if mode == "line" else None)
+        except ValueError as exc:
+            self.status.set(str(exc))
+            return
+        value = SketchDialog(self, trial, sketch).show()
+        if value:
+            self.checkpoint()
+            trial.sketches[-1] = value
+            for point_id in value.vertices:
+                point = trial.point(point_id)
+                if point.name.startswith(name + " "):
+                    point.name = value.name + point.name[len(name):]
+            self.project = trial
+            self.draft.clear()
+            self.cursor_world = None
+            self.selected = "sketch", value.id
+            self.refresh()
+            self.select_tree_item(self.selected)
+            self.status.set("Outline added. Choose Dimension, select any two features and enter their horizontal size / tolerance.")
 
     def hit(self, event) -> tuple[str, str] | None:
         positions = self.display_positions() or {p.id: p.x - self.project.point(self.project.datum).x for p in self.project.points}
@@ -668,17 +797,81 @@ class StackupApp(tk.Tk):
             for tag in self.canvas.gettags(item):
                 if ":" in tag:
                     kind, item_id = tag.split(":", 1)
-                    if kind in self.trees:
+                    if kind in self.trees or kind == "sketch":
                         return kind, item_id
                 if tag == "gap":
                     return "gap", "gap"
+        return None
+
+    def hit_feature(self, event):
+        hit = self.hit(event)
+        if hit and hit[0] == "point":
+            return hit
+        if not self.project.points:
+            return None
+        positions = self.display_positions() or {p.id: p.x - self.project.point(self.project.datum).x for p in self.project.points}
+        for sketch in reversed(self.project.sketches):
+            if sketch.kind == "circle":
+                continue
+            pairs = list(zip(sketch.vertices, sketch.vertices[1:]))
+            if sketch.closed:
+                pairs.append((sketch.vertices[-1], sketch.vertices[0]))
+            for start, end in pairs:
+                first, last = self.project.point(start), self.project.point(end)
+                x1, y1 = self.screen(positions[start], first.y)
+                x2, y2 = self.screen(positions[end], last.y)
+                if abs(x1 - x2) < 1e-5 and abs(event.x - x1) <= 8 and min(y1, y2) <= event.y <= max(y1, y2):
+                    return "point", start if abs(event.y - y1) <= abs(event.y - y2) else end
+        for body in reversed(self.project.bodies):
+            cy = (self.project.point(body.left).y + self.project.point(body.right).y) / 2
+            for point_id in (body.left, body.right):
+                x, y = self.screen(positions[point_id], cy)
+                if abs(event.x - x) <= 8 and abs(event.y - y) <= body.height / 2 * self.scale:
+                    return "point", point_id
         return None
 
     def canvas_down(self, event):
         self.canvas.focus_set()
         mode = self.mode.get()
         hit = self.hit(event)
-        if mode == "point":
+        if self.pending_annotation is not None and mode == "dimension":
+            dimension = next((d for d in self.project.dimensions if d.id == self.pending_annotation), None)
+            if dimension:
+                self.checkpoint()
+                x, y = self.world(event.x, event.y)
+                positions = self.display_positions()
+                origin = self.project.point(self.project.datum).x
+                midpoint = ((positions[dimension.start] + positions[dimension.end]) / 2 + origin) if positions else (self.project.point(dimension.start).x + self.project.point(dimension.end).x) / 2
+                dimension.annotation_y, dimension.label_offset = y, x - midpoint
+                self.pending_annotation = None
+                self.refresh(recalculate=False)
+                self.status.set("Dimension placed. Select two more features, or use Select to drag / edit a label.")
+            return
+        if mode in ("profile", "line", "circle"):
+            x, y = self.world(event.x, event.y)
+            if mode == "profile" and len(self.draft) >= 3:
+                datum = self.project.point(self.project.datum).x if self.project.points else 0
+                sx, sy = self.screen(self.draft[0][0] - datum, self.draft[0][1])
+                if math.hypot(event.x - sx, event.y - sy) <= 11:
+                    self.finish_sketch(closed=True)
+                    return
+            ref = None
+            if mode == "line" and hit and hit[0] == "point":
+                ref = hit[1]
+                positions = self.display_positions()
+                point = self.project.point(ref)
+                origin = self.project.point(self.project.datum).x
+                x, y = positions[ref] + origin if positions else point.x, point.y
+            if self.draft and math.hypot(x - self.draft[-1][0], y - self.draft[-1][1]) < 1e-8:
+                return
+            self.draft.append((x, y, ref))
+            self.cursor_world = x, y
+            if mode in ("line", "circle") and len(self.draft) == 2:
+                self.finish_sketch()
+            else:
+                self.status.set(f"{len(self.draft)} vertices. Click the first to close, or Enter / Finish sketch. Backspace removes the last.")
+                self.draw()
+        elif mode == "point":
             self.checkpoint()
             point_id = self.project.next_id("P")
             x, y = self.world(event.x, event.y)
@@ -695,6 +888,7 @@ class StackupApp(tk.Tk):
                 self.tool_start = None
                 self.create_body(start, end)
         elif mode in ("dimension", "gap"):
+            hit = self.hit_feature(event)
             if not hit or hit[0] != "point":
                 self.status.set("Click a face point (small circle), or use the editor's point dropdowns.")
                 return
@@ -706,22 +900,33 @@ class StackupApp(tk.Tk):
                 start, end = self.tool_start, hit[1]
                 self.tool_start = None
                 if mode == "dimension":
-                    self.add_dimension(start, end)
+                    self.add_dimension(start, end, place_label=True)
                 else:
                     self.edit_gap(start, end)
         else:
             self.selected = hit
             self.select_tree_item(hit)
-            if hit and hit[0] in ("point", "body") and self.view.get() == "Reference pose":
+            if hit and hit[0] == "dimension":
+                index = next(i for i, d in enumerate(self.project.dimensions) if d.id == hit[1])
+                dimension = self.project.dimensions[index]
+                self.drag = {"kind": "dimension", "id": hit[1], "mouse": (event.x, event.y),
+                             "annotation": (dimension_y(self.project, index), dimension.label_offset), "changed": False}
+            elif hit and hit[0] in ("point", "body", "sketch") and self.view.get() == "Reference pose":
                 if hit[0] == "point":
-                    ids = [hit[1]]
-                else:
+                    ids = self.project.aligned_points(hit[1])
+                    for sketch in self.project.sketches:
+                        if sketch.kind == "circle" and sketch.vertices[1] == hit[1]:
+                            ids.update(sketch.vertices)
+                elif hit[0] == "body":
                     body = next(body for body in self.project.bodies if body.id == hit[1])
                     ids = [body.left, body.right]
+                else:
+                    sketch = next(sketch for sketch in self.project.sketches if sketch.id == hit[1])
+                    ids = set().union(*(self.project.aligned_points(p) for p in sketch.vertices))
                 coords = self.display_positions()
                 origin = self.project.point(self.project.datum).x
                 starts = {point_id: (coords[point_id] + origin if coords else self.project.point(point_id).x, self.project.point(point_id).y) for point_id in ids}
-                self.drag = {"mouse": (event.x, event.y), "starts": starts, "changed": False}
+                self.drag = {"kind": "points", "mouse": (event.x, event.y), "starts": starts, "changed": False}
             self.draw()
 
     def canvas_move(self, event):
@@ -732,18 +937,32 @@ class StackupApp(tk.Tk):
         if not self.drag["changed"] and math.hypot(event.x - x, event.y - y) > 3:
             self.checkpoint()
             self.drag["changed"] = True
-            self.result = None
+            if self.drag["kind"] == "points":
+                self.result = None
         if self.drag["changed"]:
             if self.snap.get():
                 dx, dy = round(dx * 2) / 2, round(dy * 2) / 2
-            for point_id, (sx, sy) in self.drag["starts"].items():
-                point = self.project.point(point_id)
-                point.x, point.y = sx + dx, sy + dy
+            if self.drag["kind"] == "dimension":
+                dimension = next(d for d in self.project.dimensions if d.id == self.drag["id"])
+                old_y, old_offset = self.drag["annotation"]
+                dimension.annotation_y, dimension.label_offset = old_y + dy, old_offset + dx
+            else:
+                for point_id, (sx, sy) in self.drag["starts"].items():
+                    point = self.project.point(point_id)
+                    point.x, point.y = sx + dx, sy + dy
+                for sketch in self.project.sketches:
+                    if sketch.kind == "circle":
+                        left, center, right = (self.project.point(p) for p in sketch.vertices)
+                        center.x = (left.x + right.x) / 2
+                        changed = [p for p in sketch.vertices if p in self.drag["starts"]]
+                        if changed:
+                            y = self.project.point(changed[0]).y
+                            left.y = center.y = right.y = y
             self.draw()
 
     def canvas_up(self, _):
         if self.drag and self.drag["changed"]:
-            self.refresh()
+            self.refresh(recalculate=self.drag["kind"] != "dimension")
         self.drag = None
 
     def canvas_double(self, event):
@@ -767,6 +986,8 @@ class StackupApp(tk.Tk):
             menu.grab_release()
 
     def select_tree_item(self, item):
+        if item and item[0] == "sketch":
+            item = "body", item[1]
         if item and item[0] in self.trees and self.trees[item[0]].exists(item[1]):
             tree = self.trees[item[0]]
             self.notebook.select(tree.master)
@@ -776,6 +997,7 @@ class StackupApp(tk.Tk):
     def tree_selected(self, kind):
         ids = self.trees[kind].selection()
         if ids:
+            kind = "sketch" if kind == "body" and any(s.id == ids[0] for s in self.project.sketches) else kind
             self.selected = kind, ids[0]
             self.selection_label.configure(text=f"Selected {ids[0]}. Double-click or press Edit.")
             self.draw()
@@ -804,7 +1026,7 @@ class StackupApp(tk.Tk):
         else:
             self.draw()
 
-    def add_dimension(self, start=None, end=None):
+    def add_dimension(self, start=None, end=None, *, place_label=False):
         if len(self.project.points) < 2:
             self.status.set("Add at least two face points first.")
             return
@@ -813,9 +1035,14 @@ class StackupApp(tk.Tk):
             self.checkpoint()
             self.project.dimensions.append(value)
             self.refresh()
+            if place_label:
+                self.pending_annotation = value.id
+                self.status.set("Click where this dimension should be drawn. Escape keeps the automatic position.")
 
     def add_fit(self):
         self.tool_start = None
+        self.draft.clear()
+        self.pending_annotation = None
         if len(self.project.points) < 4:
             self.status.set("A fit requires the slot's two points and the moving body's two points.")
             return
@@ -843,10 +1070,13 @@ class StackupApp(tk.Tk):
         if not selected:
             return
         kind, item_id = selected
+        if kind == "body" and any(s.id == item_id for s in self.project.sketches):
+            kind = "sketch"
         if kind == "gap":
             self.edit_gap()
             return
-        groups = {"point": self.project.points, "dimension": self.project.dimensions, "fit": self.project.fits, "body": self.project.bodies}
+        groups = {"point": self.project.points, "dimension": self.project.dimensions, "fit": self.project.fits,
+                  "body": self.project.bodies, "sketch": self.project.sketches}
         item = next((item for item in groups[kind] if item.id == item_id), None)
         if item is None:
             return
@@ -856,6 +1086,8 @@ class StackupApp(tk.Tk):
             value = DimensionDialog(self, self.project, existing=item).show()
         elif kind == "fit":
             value = FitDialog(self, self.project, item).show()
+        elif kind == "sketch":
+            value = SketchDialog(self, self.project, item).show()
         else:
             value = BodyDialog(self, self.project, item.left, item.right, item).show()
         if value:
@@ -865,7 +1097,21 @@ class StackupApp(tk.Tk):
                 self.project.bodies = [body if old.id == body.id else old for old in self.project.bodies]
                 self.project.dimensions = [d for d in self.project.dimensions if d.id != dimension.id] + [dimension]
             else:
+                if kind == "point":
+                    for other_id in self.project.aligned_points(item_id) - {item_id}:
+                        self.project.point(other_id).x += value.x - item.x
+                    for sketch in self.project.sketches:
+                        if sketch.kind == "circle" and item_id == sketch.vertices[1]:
+                            for other_id in (sketch.vertices[0], sketch.vertices[2]):
+                                self.project.point(other_id).x += value.x - item.x
                 groups[kind][:] = [value if old.id == item_id else old for old in groups[kind]]
+                if kind == "point":
+                    for sketch in self.project.sketches:
+                        if sketch.kind == "circle":
+                            left, center, right = (self.project.point(p) for p in sketch.vertices)
+                            center.x = (left.x + right.x) / 2
+                            if item_id in sketch.vertices:
+                                left.y = center.y = right.y = value.y
             self.refresh()
 
     def delete_selected(self, kind=None):
@@ -876,13 +1122,17 @@ class StackupApp(tk.Tk):
         if not selected:
             return
         kind, item_id = selected
-        if kind == "point" and not messagebox.askyesno("Delete face point", "Delete this point and every dimension, body, fit or gap that references it? Undo can restore them.", parent=self):
+        if kind == "body" and any(s.id == item_id for s in self.project.sketches):
+            kind = "sketch"
+        if kind == "point" and not messagebox.askyesno("Delete feature point", "Delete this point and every dimension, shape, fit or gap that references it? Undo can restore them.", parent=self):
             return
         self.checkpoint()
         if kind == "point":
             self.project.remove_point(item_id)
         elif kind == "gap":
             self.project.gap = None
+        elif kind == "sketch":
+            self.project.remove_sketch(item_id)
         else:
             attr = {"dimension": "dimensions", "fit": "fits", "body": "bodies"}[kind]
             setattr(self.project, attr, [item for item in getattr(self.project, attr) if item.id != item_id])
@@ -890,6 +1140,8 @@ class StackupApp(tk.Tk):
         self.refresh()
         if kind == "body":
             self.status.set("Removed the visual body. Its face points and analytical dimensions remain in the model.")
+        elif kind == "sketch":
+            self.status.set("Removed this shape and its unshared features. Undo restores the part and its dimensions.")
 
     def set_datum(self):
         if self.selected and self.selected[0] == "point":
@@ -902,6 +1154,8 @@ class StackupApp(tk.Tk):
             self.redo_stack.append(self.project.copy())
             self.project = self.undo_stack.pop()
             self.tool_start, self.selected = None, None
+            self.draft.clear()
+            self.pending_annotation = None
             self.refresh()
 
     def redo(self):
@@ -909,6 +1163,8 @@ class StackupApp(tk.Tk):
             self.undo_stack.append(self.project.copy())
             self.project = self.redo_stack.pop()
             self.tool_start, self.selected = None, None
+            self.draft.clear()
+            self.pending_annotation = None
             self.refresh()
 
     def may_discard(self):
@@ -925,6 +1181,9 @@ class StackupApp(tk.Tk):
         self.undo_stack.clear()
         self.redo_stack.clear()
         self.selected, self.tool_start = None, None
+        self.draft.clear()
+        self.pending_annotation = None
+        self.drag = None
         self.view.set("Reference pose")
         self.refresh()
         self.after(30, self.fit_view)
@@ -932,7 +1191,7 @@ class StackupApp(tk.Tk):
     def new_project(self):
         if self.may_discard():
             self.replace_project(Project())
-            self.mode.set("body")
+            self.mode.set("profile")
             self.change_tool()
 
     def load_example(self):
@@ -1002,11 +1261,17 @@ class StackupApp(tk.Tk):
         text.pack(fill="both", expand=True)
         text.insert("end", """BUILD A STACKUP
 
-1. Choose Body, click two horizontal faces, then enter its width and signed tolerance deviations. Choose Housing / slot for a cavity outline. Or place individual face points with Point.
-2. Add a dimension by clicking From and To points, or use Add in the Dims tab. A contact relation ties two faces at zero distance. A placement relation defines a bounded assembly position or known mounting float.
+1. Choose Profile and click your part's vertices. Click the first vertex to close, or press Enter / Finish sketch. Choose Open path in its properties to keep an outline open. Backspace removes the last draft vertex; Escape cancels. Line connects two endpoints and may reuse existing features. Circle creates left, center and right features. Rectangle provides the original two-face body tool.
+2. Choose Dimension and select any two vertices, vertical faces or circle features. Enter the signed horizontal size and tolerances, then click to place its annotation. In Select mode, drag a dimension label to arrange the drawing, or double-click it to edit the nominal size and tolerances. Add in the Dims tab also lets you choose endpoints from dropdowns. A contact ties two faces at zero separation; a placement relation defines mounting position / movement.
 3. For clearance-dependent movement, choose Fit / float. Select the slot limits and both moving faces. Use free float, left contact, right contact or centered.
 4. Choose Gap and click its From and To faces. Set minimum / maximum requirements if needed.
-5. View the reference, minimum-gap and maximum-gap assemblies. Double-click a dimension or fit to edit it. Save the project and export an HTML report, CSV or SVG.
+5. View the reference, minimum-gap and maximum-gap assemblies. Changing a dimension updates the drawn x-positions. Save the project and export an HTML report, CSV or SVG, including the custom outlines.
+
+CUSTOM SKETCH GEOMETRY
+
+Points drawn at the same x-coordinate in one profile form a shared-x column: vertical faces stay vertical when sizes vary. Circles keep the center midway between their left and right edges. These geometric relations carry no manufacturing allowance. Add the dimensions you require between any features, including internal shoulders and circle centers. Sketch pixels do not impose hidden size tolerances; a gap remains unbounded if its features are not sufficiently dimensioned and located.
+
+For an internal feature on a floating part, dimension it relative to that part's other features. It then follows the same assembly movement. Line endpoints share coordinates only when you deliberately select an existing point. Separate profiles create separate part features even when initially drawn at the same position.
 
 HOW MOVEMENT IS INCLUDED
 
@@ -1026,7 +1291,7 @@ Size fit risk: some individually permitted sizes interfere, even when other comb
 
 CONTROLS AND SCOPE
 
-Wheel to zoom; middle-drag to pan; Fit view to recenter. Right-click a point to edit it or set datum A. Ctrl+S saves; Ctrl+O opens; Ctrl+Z / Ctrl+Y undo and redo. Delete a body to remove its visual shape; its analytical face points and dimensions remain.
+Wheel to zoom; middle-drag to pan; Fit view to recenter. Right-click a point to edit it or set datum A. Ctrl+S saves; Ctrl+O opens; Ctrl+Z / Ctrl+Y undo and redo. Delete a custom shape to remove its unshared features and dependent constraints. Connected line endpoints shared with another shape are retained. The legacy rectangle tool retains its analytical face points when its visual body is deleted.
 
 All dimensions are signed along x: To − From. Units are mm. The y axis is layout only. This app covers linear size variation, rigid translation and specified contacts. Rotation, form, angular tolerances, elasticity and full GD&T are outside the model. No probability distribution is assumed.
 """)
@@ -1039,3 +1304,17 @@ All dimensions are signed along x: To − From. Units are mm. The y axis is layo
                 self.after_cancel(self.analysis_timer)
             self.executor.shutdown(wait=False, cancel_futures=True)
             self.destroy()
+
+    def destroy(self):
+        self.closing = True
+        for name in ("analysis_timer", "poll_timer"):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                try:
+                    self.after_cancel(timer)
+                except tk.TclError:
+                    pass
+                setattr(self, name, None)
+        if hasattr(self, "executor"):
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        super().destroy()

@@ -103,6 +103,17 @@ def _problem(project: Project, *, nominal_sizes: bool = False, sizes_only: bool 
     ids = [point.id for point in project.points]
     problem = _Problem(ids, {point_id: i for i, point_id in enumerate(ids)})
     problem.interval(problem.expression({project.datum: 1.0}), 0.0, 0.0, "Datum")
+    # Sketch geometry is retained in both the assembly and pre-fit size audit.
+    # Drawing distances do not create manufacturing dimensions implicitly.
+    for sketch in project.sketches:
+        label = "Geometry: " + sketch.id + " · " + sketch.name
+        for group in sketch.columns:
+            for point_id in group[1:]:
+                problem.interval(problem.difference(group[0], point_id), 0, 0, label)
+        if sketch.kind == "circle":
+            left, center, right = sketch.vertices
+            problem.interval(problem.expression({center: 2, left: -1, right: -1}), 0, 0, label)
+            problem.less_equal(problem.difference(right, left), 0, label)
     for dimension in project.dimensions:
         if sizes_only and dimension.kind != "size":
             continue
@@ -189,15 +200,25 @@ def analyze(project: Project) -> Analysis:
     except ValueError as exc:
         return Analysis("invalid", str(exc))
     if not project.points:
-        return Analysis("incomplete", "Draw a body or add points, then define dimensions and a gap.")
-    if project.gap is None:
-        return Analysis("incomplete", "Pick the two face points that define the functional gap.")
+        return Analysis("incomplete", "Sketch a profile, line, circle or rectangle, then add dimensions and a gap.")
     problem = _problem(project)
     feasible = problem.solve([0.0] * len(problem.ids))
     if feasible.status == 2:
         return Analysis("infeasible", "No assembly can satisfy all these dimensions and fit conditions.", conflicts=_conflicting_labels(problem))
     if not feasible.success:
         return Analysis("error", "The numerical solver could not establish feasibility: " + feasible.message)
+
+    if project.gap is None:
+        # Driving dimensions must update the sketch while it is being designed,
+        # before the user chooses which functional gap to evaluate.
+        nominal_problem = _problem(project, nominal_sizes=True)
+        reference = _closest(nominal_problem, project)
+        result = Analysis("incomplete", "Pick the two face points that define the functional gap.")
+        if reference.success:
+            result.nominal_positions = _positions(nominal_problem, reference)
+        else:
+            result.warnings.append("Nominal sizes do not satisfy the assembly constraints; no nominal pose is shown.")
+        return result
 
     row = problem.difference(project.gap.start, project.gap.end)
     low, high = problem.solve(row), problem.solve([-v for v in row])
