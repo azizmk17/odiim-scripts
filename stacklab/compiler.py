@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import re
 
 import networkx as nx
 import numpy as np
@@ -75,6 +76,7 @@ def validate_project(project: Project) -> list[Diagnostic]:
                 *project.policies, *project.correlations, *project.parameters, *project.joints, *project.assemblies,
                 *project.analysis_cases]
     entities.extend(face for part in project.definitions for face in part.faces)
+    entities.extend(outline for part in project.definitions for outline in part.outlines)
     seen: set[str] = set()
     for entity in entities:
         if not isinstance(entity.id, str) or not entity.id:
@@ -99,9 +101,20 @@ def validate_project(project: Project) -> list[Diagnostic]:
         elif ref.face_id not in {f.id for f in definitions[instances[ref.instance_id].definition_id].faces}:
             error("missing_face", f"'{owner}' refers to missing face '{ref.face_id}'", owner, ref.face_id)
     for definition in project.definitions:
+        face_ids = {face.id for face in definition.faces}
         for face in definition.faces:
-            if not _finite(face.local_x):
+            if not _finite(face.local_x) or not _finite(face.local_y):
                 error("coordinate", f"Face '{face.name}' has a nonfinite local coordinate", face.id)
+        for outline in definition.outlines:
+            if len(outline.vertices) < (3 if outline.closed else 2):
+                error("outline", f"Outline '{outline.name}' needs at least {'three' if outline.closed else 'two'} vertices", outline.id)
+            if not re.fullmatch(r"#[0-9a-fA-F]{6}", outline.color):
+                error("outline_color", f"Outline '{outline.name}' needs a six-digit hex color", outline.id)
+            for vertex in outline.vertices:
+                if not _finite(vertex.x) or not _finite(vertex.y):
+                    error("outline_coordinate", f"Outline '{outline.name}' has a nonfinite vertex", outline.id)
+                if vertex.face_id is not None and vertex.face_id not in face_ids:
+                    error("outline_face", f"Outline '{outline.name}' binds to a missing face", outline.id)
     for instance in project.instances:
         if instance.definition_id not in definitions:
             error("missing_definition", f"Instance '{instance.name}' has no valid definition", instance.id)

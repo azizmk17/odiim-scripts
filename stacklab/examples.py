@@ -6,8 +6,8 @@ from pathlib import Path
 
 from .domain import (
     AnalysisCase, AssemblyConstraint, AssemblyPolicy, ContactPair, Dimension,
-    Face, FaceRef, FunctionalRequirement, PartDefinition, PartInstance, Project,
-    Tolerance, VariationSource,
+    Face, FaceRef, FunctionalRequirement, Outline, PartDefinition, PartInstance,
+    Project, SketchVertex, Tolerance, VariationSource,
 )
 from .persistence import save_project
 
@@ -193,12 +193,122 @@ def inconsistent_loop() -> Project:
     )
 
 
+def stepped_pin_reference() -> Project:
+    """Illustrative solution to a stepped pin, cradle, guard and datum sketch.
+
+    The reference image has no dimensions; these values are editable examples,
+    not measurements extracted from its pixels.
+    """
+    base_left = FaceRef("f-base", "f-base-left")
+    base_right = FaceRef("f-base", "f-base-right")
+    insert_left = FaceRef("f-insert", "f-insert-left")
+    insert_inner = FaceRef("f-insert", "f-insert-inner")
+    pin_left = FaceRef("f-pin", "f-pin-left")
+    pin_head = FaceRef("f-pin", "f-pin-head")
+    pin_stem = FaceRef("f-pin", "f-pin-stem")
+    guard_left = FaceRef("f-guard", "f-guard-left")
+    guard_right = FaceRef("f-guard", "f-guard-right")
+    datum = FaceRef("f-datum", "f-datum-face")
+    pairs = [
+        _dimension("f-base-width", "Cradle outside width", base_left, base_right, 70, 0.20,
+                   std=0.20 / 3),
+        _dimension("f-insert-opening", "Insert inner right edge", insert_left, insert_inner,
+                   50, 0.10, std=0.10 / 3),
+        _dimension("f-pin-head-width", "Pin head width", pin_left, pin_head, 52, 0.15,
+                   std=0.15 / 3),
+        _dimension("f-guard-width", "Guard thickness", guard_left, guard_right, 5, 0.10,
+                   std=0.10 / 3),
+    ]
+    def polygon(identifier, name, coords, color, bindings=None):
+        bindings = bindings or {}
+        return Outline(identifier, name,
+                       [SketchVertex(x, y, bindings.get(x)) for x, y in coords],
+                       True, color)
+    base_outline = polygon("f-base-shape", "U-shaped cradle",
+        [(0, 18), (8, 18), (8, 47), (66, 47), (66, 18), (70, 18), (70, 53), (0, 53)],
+        "#d4ad00", {0: "f-base-left", 70: "f-base-right"})
+    insert_outline = polygon("f-insert-shape", "U-shaped insert",
+        [(0, 10), (8, 10), (8, 38), (50, 38), (50, 10), (55, 10), (55, 44), (0, 44)],
+        "#6132aa", {0: "f-insert-left", 50: "f-insert-inner"})
+    pin_outline = polygon("f-pin-shape", "Stepped pin",
+        [(0, -25), (52, -25), (52, -7), (35, -7), (35, 32), (17, 32),
+         (17, -7), (0, -7)],
+        "#d44845", {0: "f-pin-left", 52: "f-pin-head", 35: "f-pin-stem"})
+    guard_outline = polygon("f-guard-shape", "Upper guard",
+        [(0, -30), (5, -30), (5, 0), (0, 0)], "#d4ad00",
+        {0: "f-guard-left", 5: "f-guard-right"})
+    definitions = [
+        PartDefinition("f-base-def", "Yellow cradle", [
+            Face("f-base-left", "Cradle left", 0, local_y=18),
+            Face("f-base-right", "Cradle right", 70, local_y=18)], [base_outline]),
+        PartDefinition("f-insert-def", "Purple insert", [
+            Face("f-insert-left", "Insert left", 0, local_y=10),
+            Face("f-insert-inner", "Insert inner edge", 50, "slot", 10)], [insert_outline]),
+        PartDefinition("f-pin-def", "Red stepped pin", [
+            Face("f-pin-left", "Head left", 0, local_y=-25),
+            Face("f-pin-head", "Head right", 52, "head", -25),
+            Face("f-pin-stem", "Stem right", 35, "slot", 32)], [pin_outline]),
+        PartDefinition("f-guard-def", "Yellow upper guard", [
+            Face("f-guard-left", "Guard left", 0, "head", -30),
+            Face("f-guard-right", "Guard right", 5, local_y=-30)], [guard_outline]),
+        PartDefinition("f-datum-def", "Right reference line", [
+            Face("f-datum-face", "Reference", 0, "centerline")]),
+    ]
+    instances = [
+        PartInstance("f-base", "Yellow cradle", "f-base-def"),
+        PartInstance("f-insert", "Purple insert", "f-insert-def", 10),
+        PartInstance("f-pin", "Red stepped pin", "f-pin-def", 20),
+        PartInstance("f-guard", "Upper guard", "f-guard-def", 75),
+        PartInstance("f-datum", "Right datum", "f-datum-def", 100),
+    ]
+    requirements = [
+        FunctionalRequirement("f-head-gap", "Head-to-guard gap", pin_head, guard_left,
+                              min_value=2, max_value=4, methods=["worst_case", "rss"]),
+        FunctionalRequirement("f-upper-datum", "Upper guard-to-datum distance", guard_right,
+                              datum, methods=["worst_case"]),
+        FunctionalRequirement("f-lower-datum", "Cradle-to-datum distance", base_right,
+                              datum, methods=["worst_case"]),
+        FunctionalRequirement("f-stem-gap", "Stem-to-insert clearance", pin_stem,
+                              insert_inner, methods=["worst_case"]),
+    ]
+    return Project(
+        id="example-f", name="Stepped pin with two reference distances",
+        definitions=definitions, instances=instances,
+        dimensions=[*(pair[0] for pair in pairs),
+            Dimension("f-stem-offset", "Head left to stem right", pin_left, pin_stem,
+                      35, kind="basic")],
+        sources=[pair[1] for pair in pairs],
+        constraints=[
+            AssemblyConstraint("f-ground", "Fix cradle left", "fixed_face",
+                               first=base_left, value=0),
+            AssemblyConstraint("f-insert-location", "Locate insert in cradle", "fixed_offset",
+                               first=base_left, second=insert_left, value=10),
+            AssemblyConstraint("f-pin-location", "Locate pin head", "fixed_offset",
+                               first=base_left, second=pin_left, value=20),
+            AssemblyConstraint("f-guard-location", "Guard beyond cradle", "fixed_offset",
+                               first=base_right, second=guard_left, value=5),
+            AssemblyConstraint("f-reference", "Fix right reference line", "fixed_face",
+                               first=datum, value=100),
+        ],
+        contacts=[
+            ContactPair("f-head-contact", pin_head, guard_left, "head", "Head cannot enter guard"),
+            ContactPair("f-slot-contact", pin_stem, insert_inner, "slot", "Stem cannot enter insert side"),
+        ],
+        requirements=requirements,
+        analysis_cases=[AnalysisCase("f-case", "Head clearance", "f-head-gap",
+                                     ["worst_case", "rss"])],
+        view={"part_y": {instance.id: 210 for instance in instances},
+              "long_centerline": True},
+    )
+
+
 EXAMPLE_BUILDERS = {
     "A": fixed_chain,
     "B": floating_block,
     "C": coupled_float,
     "D": inconsistent_loop,
     "E": lambda: fixed_chain(statistical=True),
+    "F": stepped_pin_reference,
 }
 
 EXAMPLE_FILENAMES = {
@@ -207,6 +317,7 @@ EXAMPLE_FILENAMES = {
     "C": "c-coupled-floating.stack1d",
     "D": "d-inconsistent-loop.stack1d",
     "E": "e-statistical-chain.stack1d",
+    "F": "f-stepped-pin-reference.stack1d",
 }
 
 
@@ -215,7 +326,7 @@ def create_example(name: str) -> Project:
     try:
         return EXAMPLE_BUILDERS[key]()
     except KeyError as exc:
-        raise ValueError(f"Unknown example '{name}'; choose A, B, C, D, or E") from exc
+        raise ValueError(f"Unknown example '{name}'; choose A, B, C, D, E, or F") from exc
 
 
 def write_example_projects(directory: str | Path) -> list[Path]:

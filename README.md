@@ -1,6 +1,6 @@
 # StackLab 1D
 
-StackLab 1D is a desktop tool for sketching axial assemblies and analyzing mechanical tolerance stack-ups. The sketch is connected to a parametric engineering model: dimensions control local part geometry, assembly constraints control part translations, and selected functional faces define the measured gap. The application uses PySide6 for the workspace and SciPy for linear assembly and worst-case optimization.
+StackLab 1D is a desktop tool for sketching axial assemblies and analyzing mechanical tolerance stack-ups. Parts can have concave polygons, multiple closed contours, and open polylines. The sketch is connected to a parametric engineering model: dimensions control local part geometry, assembly constraints control part translations, and selected functional faces define the measured gap. The application uses PySide6 for the workspace and SciPy for linear assembly and worst-case optimization.
 
 ## Install and launch
 
@@ -25,14 +25,17 @@ If another environment such as `pyoccenv` is active, launch through `run.bat`; i
 
 ## Model an assembly
 
-1. Use **Create Part** to add a component. **Add Face** places another axial face on its local profile. Reusable part definitions and individual instances appear in the assembly tree.
-2. Use **Dimension**, then select two faces. Enter the signed nominal separation, lower and upper deviations, a dimension role, and a process distribution. Driving dimensions update model geometry. Choose **New independent source** or reuse an existing source with a signed coefficient to link manufacturing effects across dimensions. Edit a source in the assembly tree to update every linked tolerance. Use **Correlate** to set a correlation between two sources. Reference and derived dimensions are informational; basic dimensions constrain nominal geometry without manufacturing variation. Bilateral, unilateral, and limit annotation styles are available.
-3. Use **Constraint** to fix any selected face at an axial coordinate, fix a part translation, align faces, set a fixed offset, or bound motion. The model can have several movable parts. **Centerline** creates a selectable axial datum marker; the same Dimension tool can dimension a face to this marker.
-4. Use **Contact** to mark compatible interface faces that cannot penetrate. A contact candidate enforces `x(second) >= x(first)`; it does not become active merely because two lines overlap on screen. Choose a **Position Policy** such as free movement, left or right seating, or centering between two opposing contacts.
-5. Use **Measure Gap**, then select the first and second functional faces. Set optional acceptance limits and select a positioning policy. **Analyze** computes the automatic dimensional chain and the selected methods. Selecting a result highlights its contributors on the sketch.
-6. Edit a dimension or tolerance in the tree or properties panel, then analyze again. Undo and redo are available with Ctrl+Z and Ctrl+Y. Use the wheel to zoom, middle-drag to pan, and Ctrl+0 to fit the assembly. Save as a `.stack1d` project and export a PDF, CSV, or XLSX report after analysis.
+1. Use **Draw Part** to click the vertices of any closed polygon, including stepped or U-shaped profiles. Finish with Enter, a double-click, or a right-click; Backspace removes the last point and Escape cancels. **Add Outline** adds another closed region to the selected part, and **Add Polyline** adds an open contour. Select an outline in the tree and double-click it to edit vertex coordinates and optional face bindings. **Create Part** remains a fast way to start from a dimensioned axial span.
+2. Use **Place Point** and click a sketched vertex to create a dimensionable feature point there. The point is connected by a basic dimension to the nearest existing part face; edit that dimension to make it a toleranced driving dimension when needed. The clicked vertex binds to the point's solved X coordinate, so the outline follows dimension edits. **Add Face** also places a point by numeric local X and sketch Y. Reusable part definitions and individual instances appear in the assembly tree.
+3. Use **Dimension**, then select two faces. Enter the signed nominal separation, lower and upper deviations, a dimension role, and a process distribution. Driving dimensions update model geometry. Choose **New independent source** or reuse an existing source with a signed coefficient to link manufacturing effects across dimensions. Edit a source in the assembly tree to update every linked tolerance. Use **Correlate** to set a correlation between two sources. Reference and derived dimensions are informational; basic dimensions constrain nominal geometry without manufacturing variation. Bilateral, unilateral, and limit annotation styles are available.
+4. Use **Constraint** to fix any selected face at an axial coordinate, fix a part translation, align faces, set a fixed offset, or bound motion. The model can have several movable parts. **Centerline** creates a selectable axial datum marker; the same Dimension tool can dimension a face to this marker.
+5. Use **Contact** to mark compatible interface faces that cannot penetrate. A contact candidate enforces `x(second) >= x(first)`; it does not become active merely because two lines overlap on screen. Choose a **Position Policy** such as free movement, left or right seating, or centering between two opposing contacts.
+6. Use **Measure Gap**, then select the first and second functional faces. Set optional acceptance limits and select a positioning policy. **Analyze** computes the automatic dimensional chain and the selected methods. Selecting a result highlights its contributors on the sketch.
+7. Edit a dimension or tolerance in the tree or properties panel, then analyze again. Undo and redo are available with Ctrl+Z and Ctrl+Y. Use the wheel to zoom, middle-drag to pan, and Ctrl+0 to fit the assembly. Save as a `.stack1d` project and export a PDF, CSV, or XLSX report after analysis.
 
 The nominal assembly coordinate is `global face x = instance translation + local face x`. Pixels never determine engineering dimensions. Sketch lane offsets distinguish components visually; contact lanes determine whether faces are mechanically compatible.
+
+Freeform outlines describe the visible part shape. Their Y coordinates organize the drawing; each feature point's solved X coordinate determines a 1D gap. A polygon alone does not imply contact or a tolerance: add feature points, dimensions, and contact pairs explicitly for the interfaces you want analyzed. Drawn vertices can bind to named feature points, so their X coordinates move when the dimensions change.
 
 ## What the calculations mean
 
@@ -53,8 +56,10 @@ The floating-block example has a 100 ±0.20 mm housing, a 25 ±0.10 mm spacer, a
 | `examples/c-coupled-floating.stack1d` | Two coupled moving blocks | left-seated rear gap 49.55–50.45 mm |
 | `examples/d-inconsistent-loop.stack1d` | Conflicting driving dimensions | infeasibility diagnostic |
 | `examples/e-statistical-chain.stack1d` | Explicit normal process standard deviations | analytical RSS variance checked against simulation |
+| `examples/f-stepped-pin-reference.stack1d` | Concave pin and cradle like the supplied generic sketch | illustrative head gap 3.00 mm, worst case 2.65–3.35 mm; two separate distances to a right reference line |
 
 The inconsistent-loop project is intentionally invalid for analysis; it can still be opened for inspection and repair.
+The stepped-pin values are illustrative because the reference sketch did not specify dimensions. Open this project, edit the dimensions and tolerances, and rerun each gap to apply it to a real assembly.
 
 ## Project format and architecture
 

@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
                 for diagnostic in result.diagnostics:
                     print(f"  {diagnostic.severity}: {diagnostic.message}")
             if args.report:
-                export_pdf(args.report, service.project, results)
+                export_pdf(args.report, service.project, results, service.presentation)
                 print(f"PDF: {args.report}")
             if args.csv:
                 export_csv(args.csv, service.project, results)

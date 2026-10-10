@@ -10,7 +10,7 @@ py -3.12 -m venv .venv
 ```
 
 The build script installs `requirements.txt`, runs `StackLab1D.spec`, and creates
-`dist\StackLab1D\StackLab1D.exe`. The five `.stack1d` reference projects are
+`dist\StackLab1D\StackLab1D.exe`. The six `.stack1d` reference projects are
 bundled under `dist\StackLab1D\_internal\examples` by PyInstaller. Distribute
 the **entire** `dist\StackLab1D` directory; the EXE is a one-folder build and
 needs its neighboring runtime files.

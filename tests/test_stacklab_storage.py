@@ -168,7 +168,7 @@ def test_spreadsheet_exports_keep_user_labels_as_text(tmp_path: Path) -> None:
 
 def test_checked_in_examples_are_current(tmp_path: Path) -> None:
     generated = write_example_projects(tmp_path)
-    assert len(generated) == 5
+    assert len(generated) == 6
     for path in generated:
         checked_in = Path(__file__).resolve().parents[1] / "examples" / path.name
         assert load_project(checked_in).to_dict() == load_project(path).to_dict()

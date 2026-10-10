@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -14,11 +16,12 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QSpinBox,
     QVBoxLayout,
 )
 
-from stacklab.domain import FaceRef, Project
+from stacklab.domain import FaceRef, Project, SketchVertex
 
 
 def number(value: float = 0.0, *, low: float = -1e9, high: float = 1e9, decimals: int = 4) -> QDoubleSpinBox:
@@ -104,13 +107,16 @@ class PartDialog(FormDialog):
 
 
 class FaceDialog(FormDialog):
-    def __init__(self, name: str = "Face", x: float = 0.0, lane: str = "default", parent=None):
+    def __init__(self, name: str = "Face", x: float = 0.0, lane: str = "default", parent=None,
+                 *, y: float = 0.0):
         super().__init__("Edit axial face", parent)
         self.name = QLineEdit(name)
         self.x = number(x)
+        self.y = number(y)
         self.lane = QLineEdit(lane)
         self.form.addRow("Name", self.name)
         self.form.addRow("Local X", self.x)
+        self.form.addRow("Sketch Y", self.y)
         self.form.addRow("Interface lane", self.lane)
 
     def accept(self) -> None:
@@ -118,6 +124,57 @@ class FaceDialog(FormDialog):
             return self.reject_input("Give the face a name.")
         if not self.lane.text().strip():
             return self.reject_input("Give the face an interface lane.")
+        super().accept()
+
+
+class OutlineDialog(FormDialog):
+    def __init__(self, definition, outline, parent=None):
+        super().__init__("Edit sketched outline", parent)
+        self.setMinimumWidth(480)
+        self.name = QLineEdit(outline.name)
+        self.closed = QCheckBox("Closed, filled region")
+        self.closed.setChecked(outline.closed)
+        self.color = QLineEdit(outline.color)
+        self.vertices = QPlainTextEdit()
+        self.vertices.setMinimumHeight(190)
+        self.vertices.setPlainText("\n".join(
+            f"{vertex.x:g}, {vertex.y:g}" + (f", {vertex.face_id}" if vertex.face_id else "")
+            for vertex in outline.vertices))
+        self._face_ids = {face.id for face in definition.faces}
+        names = ", ".join(f"{face.name}={face.id}" for face in definition.faces)
+        hint = QLabel("One X, Y vertex per line. Optional third value binds X to a face.\n" + names)
+        hint.setWordWrap(True)
+        self.form.addRow("Name", self.name)
+        self.form.addRow("Region", self.closed)
+        self.form.addRow("Color", self.color)
+        self.form.addRow("Vertices", self.vertices)
+        self.form.addRow(hint)
+
+    def parsed_vertices(self) -> list[SketchVertex]:
+        vertices = []
+        for line in self.vertices.toPlainText().splitlines():
+            if not line.strip():
+                continue
+            fields = [field.strip() for field in line.split(",")]
+            if len(fields) not in {2, 3}:
+                raise ValueError("Each vertex needs X, Y and optionally a face ID.")
+            face_id = fields[2] if len(fields) == 3 and fields[2] else None
+            if face_id is not None and face_id not in self._face_ids:
+                raise ValueError(f"Unknown face ID: {face_id}")
+            vertices.append(SketchVertex(float(fields[0]), float(fields[1]), face_id))
+        return vertices
+
+    def accept(self) -> None:
+        if not self.name.text().strip():
+            return self.reject_input("Give the outline a name.")
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", self.color.text().strip()):
+            return self.reject_input("Use a six-digit hex color such as #4f86b2.")
+        try:
+            vertices = self.parsed_vertices()
+        except ValueError as exc:
+            return self.reject_input(str(exc))
+        if len(vertices) < (3 if self.closed.isChecked() else 2):
+            return self.reject_input("This outline needs more vertices.")
         super().accept()
 
 

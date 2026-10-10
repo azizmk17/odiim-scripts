@@ -22,6 +22,7 @@ class Face:
     name: str
     local_x: float = 0.0
     lane: str = "default"
+    local_y: float = 0.0  # sketch location; axial calculations use local_x only
 
 
 @dataclass(frozen=True)
@@ -31,10 +32,27 @@ class FaceRef:
 
 
 @dataclass
+class SketchVertex:
+    x: float
+    y: float
+    face_id: str | None = None  # bind the drawn X coordinate to a solved face
+
+
+@dataclass
+class Outline:
+    id: str
+    name: str
+    vertices: list[SketchVertex] = field(default_factory=list)
+    closed: bool = True
+    color: str = "#4f86b2"
+
+
+@dataclass
 class PartDefinition:
     id: str
     name: str
     faces: list[Face] = field(default_factory=list)
+    outlines: list[Outline] = field(default_factory=list)
 
 
 @dataclass
@@ -290,7 +308,9 @@ class Project:
                 return None
             return FaceRef(**item)
         try:
-            definitions = [PartDefinition(**{**d, "faces": [Face(**f) for f in d.get("faces", [])]}) for d in value.get("definitions", [])]
+            definitions = [PartDefinition(**{**d, "faces": [Face(**f) for f in d.get("faces", [])],
+                "outlines": [Outline(**{**o, "vertices": [SketchVertex(**v) for v in o.get("vertices", [])]})
+                             for o in d.get("outlines", [])]}) for d in value.get("definitions", [])]
             dimensions = [Dimension(**{**d, "first": ref(d["first"]), "second": ref(d["second"]),
                                        "tolerance": Tolerance(**d.get("tolerance", {}))}) for d in value.get("dimensions", [])]
             constraints = [AssemblyConstraint(**{**c, "first": ref(c.get("first")), "second": ref(c.get("second"))}) for c in value.get("constraints", [])]

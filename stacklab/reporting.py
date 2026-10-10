@@ -256,7 +256,8 @@ def export_xlsx(path: str | Path, project: Project,
 
 
 def export_pdf(path: str | Path, project: Project,
-               results: AnalysisResult | Iterable[AnalysisResult] | Mapping[str, AnalysisResult]) -> None:
+               results: AnalysisResult | Iterable[AnalysisResult] | Mapping[str, AnalysisResult],
+               presentation: Mapping | None = None) -> None:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet
@@ -280,9 +281,14 @@ def export_pdf(path: str | Path, project: Project,
         def __init__(self) -> None:
             super().__init__()
             self.width = 170 * mm
-            self.height = max(32 * mm, (len(project.instances) * 25 + 24) * mm)
+            self.profile_mode = any(definition.outlines for definition in project.definitions)
+            self.height = (95 * mm if self.profile_mode else
+                           max(32 * mm, (len(project.instances) * 25 + 24) * mm))
 
         def draw(self) -> None:
+            if self.profile_mode:
+                self._draw_profiles()
+                return
             plotted: list[tuple[str, list[tuple[str, float]]]] = []
             positions: list[float] = []
             for instance in project.instances:
@@ -334,6 +340,80 @@ def export_pdf(path: str | Path, project: Project,
                     self.canv.setStrokeColor(colors.HexColor("#52677E"))
                     self.canv.drawString(label_left, label_y, label)
             self.canv.drawRightString(self.width, 4, f"Nominal model sketch ({project.unit})")
+
+        def _draw_profiles(self) -> None:
+            if sketch_error:
+                self.canv.setFont("Helvetica", 8)
+                self.canv.setFillColor(colors.HexColor("#344759"))
+                self.canv.drawString(5, self.height - 15,
+                                     ("Nominal sketch unavailable: " + sketch_error)[:100])
+                return
+            definitions = {definition.id: definition for definition in project.definitions}
+            layout = dict(presentation or project.view)
+            rows = layout.get("part_y", {})
+            polygons = []
+            datum_xs = []
+            coordinates = []
+            for row, instance in enumerate(i for i in project.instances if i.visible):
+                definition = definitions.get(instance.definition_id)
+                if definition is None:
+                    continue
+                translation = next((nominal_positions[(instance.id, face.id)] - face.local_x
+                                    for face in definition.faces
+                                    if (instance.id, face.id) in nominal_positions), instance.translation)
+                baseline = float(rows.get(instance.id, 70 + row * 116)) / 6
+                if len(definition.faces) == 1 and definition.faces[0].lane == "centerline":
+                    datum_xs.append(nominal_positions.get((instance.id, definition.faces[0].id), translation))
+                for outline in definition.outlines:
+                    vertices = []
+                    for vertex in outline.vertices:
+                        x = (nominal_positions.get((instance.id, vertex.face_id), translation + vertex.x)
+                             if vertex.face_id else translation + vertex.x)
+                        vertices.append((x, baseline + vertex.y))
+                        coordinates.append((x, baseline + vertex.y))
+                    polygons.append((outline, vertices))
+            if not coordinates:
+                self.canv.setFont("Helvetica", 8)
+                self.canv.drawString(5, self.height - 15,
+                    ("Nominal sketch unavailable: " + sketch_error) if sketch_error else "No outlined geometry")
+                return
+            xmin = min(x for x, _ in coordinates)
+            xmax = max([x for x, _ in coordinates] + datum_xs)
+            ymin = min(y for _, y in coordinates)
+            ymax = max(y for _, y in coordinates)
+            width = max(1.0, xmax - xmin)
+            height = max(1.0, ymax - ymin)
+            scale = min((self.width - 16 * mm) / width, (self.height - 16 * mm) / height)
+            x0 = (self.width - width * scale) / 2
+            y0 = (self.height - height * scale) / 2
+            def px(x):
+                return x0 + (x - xmin) * scale
+            def py(y):
+                return self.height - y0 - (y - ymin) * scale
+            for outline, vertices in polygons:
+                if not vertices:
+                    continue
+                stroke = colors.HexColor(outline.color)
+                fill = colors.Color((stroke.red + 1) / 2, (stroke.green + 1) / 2,
+                                    (stroke.blue + 1) / 2)
+                path = self.canv.beginPath()
+                path.moveTo(px(vertices[0][0]), py(vertices[0][1]))
+                for x, y in vertices[1:]:
+                    path.lineTo(px(x), py(y))
+                if outline.closed:
+                    path.close()
+                self.canv.setStrokeColor(stroke)
+                self.canv.setFillColor(fill)
+                self.canv.setLineWidth(1.1)
+                self.canv.drawPath(path, stroke=1, fill=int(outline.closed))
+            self.canv.setStrokeColor(colors.HexColor("#344759"))
+            self.canv.setDash(3, 2)
+            for x in datum_xs:
+                self.canv.line(px(x), py(ymin - 3), px(x), py(ymax + 3))
+            self.canv.setDash()
+            self.canv.setFont("Helvetica", 7)
+            self.canv.setFillColor(colors.HexColor("#344759"))
+            self.canv.drawRightString(self.width, 4, f"Nominal outlined assembly ({project.unit})")
 
     document = SimpleDocTemplate(str(path), pagesize=A4, rightMargin=18 * mm,
                                  leftMargin=18 * mm, topMargin=17 * mm, bottomMargin=17 * mm)

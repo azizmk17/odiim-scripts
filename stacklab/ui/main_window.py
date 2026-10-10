@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import fields
 from pathlib import Path
+import sys
 from typing import Callable
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -41,16 +42,16 @@ from PySide6.QtWidgets import (
 
 from stacklab.domain import (
     AnalysisCase, AssemblyConstraint, AssemblyPolicy, ContactPair, Correlation, Dimension, Face, FaceRef,
-    FunctionalRequirement, PartDefinition, PartInstance, Tolerance,
+    FunctionalRequirement, Outline, PartDefinition, PartInstance, SketchVertex, Tolerance,
     VariationSource, new_id,
 )
 from stacklab.services import ProjectService, StaleAnalysis
 
 from .dialogs import (
     AnalysisSettingsDialog, ConstraintDialog, ContactDialog, CorrelationDialog, DimensionDialog,
-    FaceDialog, InstanceDialog, PartDialog, PolicyDialog, RequirementDialog, SourceDialog,
+    FaceDialog, InstanceDialog, OutlineDialog, PartDialog, PolicyDialog, RequirementDialog, SourceDialog,
 )
-from .sketch import SketchView
+from .sketch import SCALE, TRACK, SketchView
 
 
 class _AnalysisBridge(QObject):
@@ -72,6 +73,8 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._future = None
         self._fit_on_show = True
+        self._pending_new_part_name: str | None = None
+        self._point_instance_id: str | None = None
         self._settings = {"samples": 10000, "seed": 0, "sigma_level": 3.0}
         self._bridge = _AnalysisBridge(self)
         self._bridge.progress.connect(self._analysis_progress)
@@ -100,11 +103,21 @@ class MainWindow(QMainWindow):
     def _create_actions(self) -> None:
         self.new_action = self._action("New", self.new_project, QKeySequence.New, "Create a new assembly")
         self.open_action = self._action("Open", self.open_project, QKeySequence.Open, "Open a .stack1d project")
+        self.example_action = self._action("Open Stepped Assembly Example", self.open_stepped_example,
+                                            tip="Open the editable pin, U-shaped cradle, guard and datum example")
         self.save_action = self._action("Save", self.save_project, QKeySequence.Save, "Save the complete model")
         self.save_as_action = self._action("Save As…", self.save_as_project, QKeySequence.SaveAs)
         self.undo_action = self._action("Undo", self.undo, QKeySequence.Undo)
         self.redo_action = self._action("Redo", self.redo, QKeySequence.Redo)
         self.part_action = self._action("Create Part", self.create_part, tip="Sketch a new axial profile")
+        self.draw_part_action = self._action("Draw Part", self.draw_new_part,
+                                             tip="Click polygon vertices, then Enter or right-click to finish")
+        self.draw_outline_action = self._action("Add Outline", lambda: self.draw_outline(True),
+                                                tip="Draw another closed contour on a selected part")
+        self.draw_path_action = self._action("Add Polyline", lambda: self.draw_outline(False),
+                                             tip="Draw an open profile on a selected part")
+        self.place_point_action = self._action("Place Point", self.place_point,
+                                               tip="Click a feature to create a dimensionable point")
         self.face_action = self._action("Add Face", self.add_face, tip="Add an axial feature to a part")
         self.centerline_action = self._action("Centerline", self.add_centerline,
                                               tip="Add a fixed axial reference line for point-to-line dimensions")
@@ -124,13 +137,16 @@ class MainWindow(QMainWindow):
         self.grid_action.setChecked(True)
 
         file_menu = self.menuBar().addMenu("&File")
-        for action in (self.new_action, self.open_action, self.save_action, self.save_as_action, self.export_action):
+        for action in (self.new_action, self.open_action, self.example_action,
+                       self.save_action, self.save_as_action, self.export_action):
             file_menu.addAction(action)
         edit_menu = self.menuBar().addMenu("&Edit")
         for action in (self.undo_action, self.redo_action, self.delete_action):
             edit_menu.addAction(action)
         sketch_menu = self.menuBar().addMenu("&Sketch")
-        for action in (self.part_action, self.face_action, self.centerline_action, self.dimension_action, self.constraint_action,
+        for action in (self.part_action, self.draw_part_action, self.draw_outline_action,
+                       self.draw_path_action, self.place_point_action, self.face_action,
+                       self.centerline_action, self.dimension_action, self.constraint_action,
                        self.contact_action, self.policy_action, self.gap_action):
             sketch_menu.addAction(action)
         analysis_menu = self.menuBar().addMenu("&Analysis")
@@ -152,7 +168,8 @@ class MainWindow(QMainWindow):
         for action in (self.undo_action, self.redo_action):
             toolbar.addAction(action)
         toolbar.addSeparator()
-        for action in (self.part_action, self.face_action, self.centerline_action, self.dimension_action,
+        for action in (self.part_action, self.draw_part_action, self.draw_outline_action,
+                       self.place_point_action, self.face_action, self.centerline_action, self.dimension_action,
                        self.constraint_action, self.contact_action, self.policy_action, self.gap_action):
             toolbar.addAction(action)
         toolbar.addSeparator()
@@ -187,6 +204,9 @@ class MainWindow(QMainWindow):
         self.sketch.part_dragged.connect(self._part_dragged)
         self.sketch.edit_requested.connect(self._edit_entity)
         self.sketch.context_requested.connect(self._context_menu)
+        self.sketch.outline_finished.connect(self._outline_finished)
+        self.sketch.outline_cancelled.connect(self._sketch_cancelled)
+        self.sketch.point_clicked.connect(self._point_clicked)
         splitter.addWidget(self.sketch)
 
         right = QWidget()
@@ -312,7 +332,7 @@ class MainWindow(QMainWindow):
                 positions = self.service.nominal_geometry()
             except ValueError as exc:
                 self.status_label.setText(str(exc))
-        self.sketch.set_project(project, positions)
+        self.sketch.set_project(project, positions, self.service.presentation)
         self._show_properties()
 
     def _build_tree(self) -> None:
@@ -325,6 +345,9 @@ class MainWindow(QMainWindow):
             item = self._item(definitions, definition.name, "definition", definition.id)
             for face in definition.faces:
                 self._item(item, f"{face.name}  x={face.local_x:g} {project.unit}", "definition_face", f"{definition.id}:{face.id}")
+            for outline in definition.outlines:
+                self._item(item, f"{outline.name}  ({len(outline.vertices)} vertices)",
+                           "outline", f"{definition.id}:{outline.id}")
         instances = self._item(root, "Part instances", "group", "instances")
         for instance in project.instances:
             marker = "◌ " if not instance.visible else ""
@@ -353,7 +376,9 @@ class MainWindow(QMainWindow):
         for child_index in range(root.childCount()):
             root.child(child_index).setExpanded(True)
         if self._selected:
-            self._select_tree(*self._selected)
+            kind, identifier = self._selected
+            self._select_tree(kind, ":".join(identifier.split(":")[-2:])
+                              if kind == "outline" else identifier)
         self.tree.blockSignals(False)
 
     @staticmethod
@@ -377,7 +402,11 @@ class MainWindow(QMainWindow):
             root = self.tree.topLevelItem(index)
             found = root if root.data(0, Qt.UserRole) == (kind, identifier) else walk(root)
             if found:
-                self.tree.setCurrentItem(found)
+                old_block = self.tree.blockSignals(True)
+                try:
+                    self.tree.setCurrentItem(found)
+                finally:
+                    self.tree.blockSignals(old_block)
                 break
 
     def _tree_selected(self) -> None:
@@ -394,7 +423,8 @@ class MainWindow(QMainWindow):
     def _select_entity(self, kind: str, identifier: str, *, update_tree=True) -> None:
         self._selected = (kind, identifier)
         if update_tree:
-            self._select_tree(kind, identifier)
+            tree_identifier = ":".join(identifier.split(":")[-2:]) if kind == "outline" else identifier
+            self._select_tree(kind, tree_identifier)
         faces = {(face.instance_id, face.face_id) for face in self._picked_faces}
         self.sketch.set_highlights(self._selected, faces, self.sketch._chain_dimensions)
         self._show_properties()
@@ -449,6 +479,10 @@ class MainWindow(QMainWindow):
                 owner_id = instance.definition_id if instance else ""
             definition = next((d for d in project.definitions if d.id == owner_id), None)
             return next((face for face in definition.faces if face.id == face_id), None) if definition else None
+        if kind == "outline":
+            owner_id, outline_id = identifier.split(":")[-2:]
+            definition = next((d for d in project.definitions if d.id == owner_id), None)
+            return next((item for item in definition.outlines if item.id == outline_id), None) if definition else None
         mapping = {"definition": project.definitions, "instance": project.instances,
                    "dimension": project.dimensions, "constraint": project.constraints,
                    "contact": project.contacts, "policy": project.policies,
@@ -513,6 +547,20 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self._error("Open project", exc)
 
+    def open_stepped_example(self) -> None:
+        if not self._maybe_save():
+            return
+        root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+        path = root / "examples" / "f-stepped-pin-reference.stack1d"
+        try:
+            self.service.open(path)
+            self._selected = None
+            self._set_tool(None)
+            self.sketch.fit_assembly()
+            self.status_label.setText("Opened editable stepped assembly example")
+        except Exception as exc:
+            self._error("Open stepped example", exc)
+
     def save_project(self) -> bool:
         if self.service.path is None:
             return self.save_as_project()
@@ -570,6 +618,160 @@ class MainWindow(QMainWindow):
             self._select_entity("instance", instance_id)
             self.sketch.fit_assembly()
 
+    def draw_new_part(self) -> None:
+        name, ok = QInputDialog.getText(self, "Draw part", "Part name:",
+                                        text=f"Sketched part {len(self.service.project.instances) + 1}")
+        if not ok or not name.strip():
+            return
+        self._set_tool(None)
+        self._pending_new_part_name = name.strip()
+        self.sketch.begin_outline(None, closed=True)
+        self.status_label.setText("Draw a closed part: click vertices; Enter, double-click or right-click to finish. Esc cancels.")
+
+    def _choose_sketch_instance(self, title: str) -> PartInstance | None:
+        instance = self._selected_instance()
+        if instance and instance.visible:
+            return instance
+        instances = [item for item in self.service.project.instances if item.visible and
+                     any(d.id == item.definition_id and d.faces for d in self.service.project.definitions)]
+        if not instances:
+            QMessageBox.information(self, title, "Create a visible part first.")
+            return None
+        choices = [f"{item.name} ({item.id})" for item in instances]
+        choice, ok = QInputDialog.getItem(self, title, "Part:", choices, 0, False)
+        return instances[choices.index(choice)] if ok else None
+
+    def draw_outline(self, closed: bool = True) -> None:
+        instance = self._choose_sketch_instance("Sketch outline")
+        if instance is None:
+            return
+        self._set_tool(None)
+        self.sketch.begin_outline(instance.id, closed=closed)
+        self.status_label.setText("Click outline vertices; Enter, double-click or right-click to finish. Backspace removes a point; Esc cancels.")
+
+    def _outline_finished(self, instance_id: str | None, points: list[QPointF], closed: bool) -> None:
+        if instance_id is None:
+            name = self._pending_new_part_name or "Sketched part"
+            self._pending_new_part_name = None
+            xs = [point.x() / SCALE for point in points]
+            left_x, right_x = min(xs), max(xs)
+            if right_x - left_x < 1e-6:
+                QMessageBox.warning(self, "Draw part", "The part needs a nonzero axial width.")
+                return
+            row_y = 70 + sum(item.visible for item in self.service.project.instances) * TRACK
+            vertices = [SketchVertex(point.x() / SCALE - left_x, (point.y() - row_y) / SCALE)
+                        for point in points]
+            definition_id, new_instance_id = new_id("part"), new_id("instance")
+            left_id, right_id, dimension_id = new_id("face"), new_id("face"), new_id("dimension")
+            left_vertex = next(vertex for vertex in vertices if abs(vertex.x) < 1e-9)
+            right_vertex = next(vertex for vertex in vertices if abs(vertex.x - (right_x - left_x)) < 1e-9)
+            for vertex in vertices:
+                if abs(vertex.x) < 1e-9:
+                    vertex.face_id = left_id
+                elif abs(vertex.x - (right_x - left_x)) < 1e-9:
+                    vertex.face_id = right_id
+            outline = Outline(new_id("outline"), "Main outline", vertices, closed)
+            def change(project):
+                faces = [Face(left_id, "Left feature", 0, local_y=left_vertex.y),
+                         Face(right_id, "Right feature", right_x - left_x, local_y=right_vertex.y)]
+                project.definitions.append(PartDefinition(definition_id, name, faces, [outline]))
+                project.instances.append(PartInstance(new_instance_id, name, definition_id, left_x))
+                project.dimensions.append(Dimension(dimension_id, f"{name} width",
+                    FaceRef(new_instance_id, left_id), FaceRef(new_instance_id, right_id),
+                    right_x - left_x, Tolerance(0, 0)))
+            if self._command(change, f"Sketched {name}"):
+                self._select_entity("instance", new_instance_id)
+                self.sketch.fit_assembly()
+            return
+
+        instance = next((item for item in self.service.project.instances if item.id == instance_id), None)
+        if instance is None:
+            return
+        definition = next(d for d in self.service.project.definitions if d.id == instance.definition_id)
+        row_y = self.sketch._part_rows.get(instance_id, 70.0)
+        translation = self.sketch._translation(instance, definition)
+        vertices = []
+        for point in points:
+            global_x = point.x() / SCALE
+            face = min(definition.faces,
+                       key=lambda item: abs(self.sketch._x(instance, item) / SCALE - global_x),
+                       default=None)
+            bound = face if face and abs(self.sketch._x(instance, face) / SCALE - global_x) <= 1.0 else None
+            vertices.append(SketchVertex(face.local_x if bound else global_x - translation,
+                                         (point.y() - row_y) / SCALE,
+                                         bound.id if bound else None))
+        outline_id = new_id("outline")
+        colors = ("#b95755", "#6d57b3", "#d5a800", "#38878a", "#547aaf")
+        outline = Outline(outline_id, f"Outline {len(definition.outlines) + 1}", vertices,
+                          closed, colors[len(definition.outlines) % len(colors)])
+        def change(project):
+            next(item for item in project.definitions if item.id == definition.id).outlines.append(outline)
+        if self._command(change, "Added sketched outline"):
+            self._select_entity("outline", f"{instance.id}:{definition.id}:{outline_id}")
+
+    def _sketch_cancelled(self) -> None:
+        self._pending_new_part_name = None
+        self._point_instance_id = None
+        self.status_label.setText("Sketch cancelled")
+
+    def place_point(self) -> None:
+        instance = self._choose_sketch_instance("Place measurement point")
+        if instance is None:
+            return
+        self._set_tool(None)
+        self._point_instance_id = instance.id
+        self.sketch.begin_pick_point()
+        self.status_label.setText("Click the feature point. A basic dimension will tie its X to the part.")
+
+    def _point_clicked(self, point: QPointF) -> None:
+        instance_id = self._point_instance_id
+        self._point_instance_id = None
+        instance = next((item for item in self.service.project.instances if item.id == instance_id), None)
+        if instance is None:
+            return
+        definition = next(d for d in self.service.project.definitions if d.id == instance.definition_id)
+        row_y = self.sketch._part_rows.get(instance.id, 70.0)
+        translation = self.sketch._translation(instance, definition)
+        # A nearby sketched vertex is a more reliable target than the raw click.
+        candidates = [(outline.id, index,
+                       QPointF(self.sketch._vertex_x(instance, definition, vertex),
+                               row_y + vertex.y * SCALE))
+                      for outline in definition.outlines
+                      for index, vertex in enumerate(outline.vertices)]
+        snapped_vertex = None
+        if candidates:
+            nearest = min(candidates, key=lambda item: (item[2].x()-point.x())**2 +
+                          (item[2].y()-point.y())**2)
+            if (nearest[2].x()-point.x())**2 + (nearest[2].y()-point.y())**2 <= 14**2:
+                snapped_vertex = (nearest[0], nearest[1])
+                point = nearest[2]
+                existing_outline = next(item for item in definition.outlines if item.id == nearest[0])
+                existing_face_id = existing_outline.vertices[nearest[1]].face_id
+                if existing_face_id:
+                    self._select_entity("face", f"{instance.id}:{existing_face_id}")
+                    self.status_label.setText("Selected existing feature point")
+                    return
+        x = point.x() / SCALE - translation
+        y = (point.y() - row_y) / SCALE
+        name, ok = QInputDialog.getText(self, "Feature point", "Point name:",
+                                        text=f"Point {len(definition.faces) + 1}")
+        if not ok or not name.strip():
+            return
+        anchor = min(definition.faces, key=lambda face: abs(face.local_x - x))
+        face_id, dimension_id = new_id("face"), new_id("dimension")
+        def change(project):
+            owner = next(d for d in project.definitions if d.id == definition.id)
+            owner.faces.append(Face(face_id, name.strip(), x, local_y=y))
+            if snapped_vertex is not None:
+                outline = next(item for item in owner.outlines if item.id == snapped_vertex[0])
+                outline.vertices[snapped_vertex[1]].face_id = face_id
+                outline.vertices[snapped_vertex[1]].x = x
+            project.dimensions.append(Dimension(dimension_id, f"{name.strip()} location",
+                FaceRef(instance.id, anchor.id), FaceRef(instance.id, face_id),
+                x - anchor.local_x, kind="basic"))
+        if self._command(change, f"Placed point {name.strip()}"):
+            self._select_entity("face", f"{instance.id}:{face_id}")
+
     def _selected_instance(self) -> PartInstance | None:
         if not self._selected:
             return None
@@ -579,6 +781,12 @@ class MainWindow(QMainWindow):
         if kind == "face":
             instance_id = identifier.split(":", 1)[0]
             return self._entity("instance", instance_id)
+        if kind == "outline" and len(identifier.split(":")) == 3:
+            return self._entity("instance", identifier.split(":", 1)[0])
+        if kind in {"definition", "outline", "definition_face"}:
+            definition_id = identifier.split(":", 1)[0]
+            return next((instance for instance in self.service.project.instances
+                         if instance.definition_id == definition_id), None)
         return None
 
     def add_face(self) -> None:
@@ -600,12 +808,13 @@ class MainWindow(QMainWindow):
             return
         face_id = new_id("face")
         definition_id = definition.id
-        name, x, lane = dialog.name.text().strip(), dialog.x.value(), dialog.lane.text().strip()
+        name, x, y, lane = (dialog.name.text().strip(), dialog.x.value(),
+                            dialog.y.value(), dialog.lane.text().strip())
         # Explicit dimensions are added only through the Dimension tool, so an
         # arbitrary new face remains visibly underconstrained until dimensioned.
         def change(project):
             owner = next(d for d in project.definitions if d.id == definition_id)
-            owner.faces.append(Face(face_id, name, x, lane))
+            owner.faces.append(Face(face_id, name, x, lane, y))
         if self._command(change, f"Added face {name}"):
             self._select_entity("face", f"{instance.id}:{face_id}")
 
@@ -629,6 +838,8 @@ class MainWindow(QMainWindow):
             self._select_entity("face", f"{instance_id}:{face_id}")
 
     def _set_tool(self, tool: str | None) -> None:
+        self.sketch.cancel_outline()
+        self.sketch.cancel_pick_point()
         self._tool = tool
         self._picked_faces.clear()
         for name, action in (("dimension", self.dimension_action), ("contact", self.contact_action), ("gap", self.gap_action)):
@@ -823,6 +1034,8 @@ class MainWindow(QMainWindow):
             return
         if kind in {"face", "definition_face"}:
             self._edit_face(kind, identifier, entity)
+        elif kind == "outline":
+            self._edit_outline(identifier, entity)
         elif kind == "dimension":
             self._edit_dimension(entity)
         elif kind == "constraint":
@@ -841,7 +1054,7 @@ class MainWindow(QMainWindow):
             self._edit_part(kind, entity)
 
     def _edit_face(self, kind, identifier, face) -> None:
-        dialog = FaceDialog(face.name, face.local_x, face.lane, self)
+        dialog = FaceDialog(face.name, face.local_x, face.lane, self, y=face.local_y)
         if dialog.exec() != QDialog.Accepted:
             return
         target = identifier
@@ -849,8 +1062,25 @@ class MainWindow(QMainWindow):
             selected = self._face_in(project, kind, target)
             selected.name = dialog.name.text().strip()
             selected.local_x = dialog.x.value()
+            selected.local_y = dialog.y.value()
             selected.lane = dialog.lane.text().strip()
         self._command(change, "Edited face")
+
+    def _edit_outline(self, identifier: str, outline: Outline) -> None:
+        definition_id, outline_id = identifier.split(":")[-2:]
+        definition = next(d for d in self.service.project.definitions if d.id == definition_id)
+        dialog = OutlineDialog(definition, outline, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        vertices = dialog.parsed_vertices()
+        def change(project):
+            owner = next(d for d in project.definitions if d.id == definition_id)
+            target = next(item for item in owner.outlines if item.id == outline_id)
+            target.name = dialog.name.text().strip()
+            target.vertices = vertices
+            target.closed = dialog.closed.isChecked()
+            target.color = dialog.color.text().strip()
+        self._command(change, "Edited outline")
 
     @staticmethod
     def _face_in(project, kind, identifier):
@@ -1034,6 +1264,14 @@ class MainWindow(QMainWindow):
             removed_faces = {(i.id, face_id) for i in project.instances if i.definition_id == owner_id}
             definition = next(d for d in project.definitions if d.id == owner_id)
             definition.faces = [f for f in definition.faces if f.id != face_id]
+            for outline in definition.outlines:
+                for vertex in outline.vertices:
+                    if vertex.face_id == face_id:
+                        vertex.face_id = None
+        elif kind == "outline":
+            definition_id, outline_id = identifier.split(":")[-2:]
+            definition = next(d for d in project.definitions if d.id == definition_id)
+            definition.outlines = [item for item in definition.outlines if item.id != outline_id]
         elif kind == "dimension":
             project.dimensions = [d for d in project.dimensions if d.id != identifier]
         elif kind == "source":
@@ -1206,6 +1444,15 @@ class MainWindow(QMainWindow):
         future.add_done_callback(done)
 
     def cancel_analysis(self) -> None:
+        if self.sketch._drawing_active:
+            self.sketch.cancel_outline()
+            self._pending_new_part_name = None
+            return
+        if self.sketch._picking_point:
+            self.sketch.cancel_pick_point()
+            self._point_instance_id = None
+            self.status_label.setText("Point placement cancelled")
+            return
         if self._busy:
             self.service.cancel_analysis()
             self.status_label.setText("Cancelling analysis…")
@@ -1408,7 +1655,7 @@ class MainWindow(QMainWindow):
                 export_xlsx(path, self.service.project, [result])
             else:
                 path = path if path.lower().endswith(".pdf") else path + ".pdf"
-                export_pdf(path, self.service.project, [result])
+                export_pdf(path, self.service.project, [result], self.service.presentation)
             self.status_label.setText(f"Exported {Path(path).name}")
         except Exception as exc:
             self._error("Export report", exc)
