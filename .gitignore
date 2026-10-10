@@ -4,5 +4,5 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
-*.spec
 *.stackup.json.tmp
+*.stack1d.tmp

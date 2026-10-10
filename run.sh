@@ -4,7 +4,8 @@ cd "$(dirname "$0")"
 if [ ! -x .venv/bin/python ]; then
     python3 -m venv .venv
 fi
-if ! .venv/bin/python -c 'import scipy' >/dev/null 2>&1; then
+if ! .venv/bin/python -c 'import PySide6, scipy, reportlab, openpyxl' >/dev/null 2>&1; then
     .venv/bin/python -m pip install -r requirements.txt
 fi
+unset QT_PLUGIN_PATH QT_QPA_PLATFORM_PLUGIN_PATH PYTHONHOME PYTHONPATH
 exec .venv/bin/python main.py "$@"

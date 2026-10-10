@@ -1,247 +1,74 @@
-# Odiim 1D Stackup
+# StackLab 1D
 
-A Python desktop sketch editor for drawing custom part profiles, connected
-lines and circles, dimensioning their features, and calculating a functional
-gap along **one axis**. Nominal dimensions drive the sketch's x-positions;
-tolerances, contacts and assembly movement determine its minimum and maximum
-gap. Version **1.1.0** adds freeform outlines and movable dimension annotations.
+StackLab 1D is a desktop tool for sketching axial assemblies and analyzing mechanical tolerance stack-ups. The sketch is connected to a parametric engineering model: dimensions control local part geometry, assembly constraints control part translations, and selected functional faces define the measured gap. The application uses PySide6 for the workspace and SciPy for linear assembly and worst-case optimization.
 
-![Odiim 1D Stackup desktop interface](assets/preview.png)
+## Install and launch
 
-## Start on Windows
-
-1. Install Python **3.10 or newer**, including **Tcl/Tk and IDLE**.
-2. Extract the project into a normal folder.
-3. Double-click **`run.bat`**. On its first run it creates a local virtual
-   environment and installs SciPy. Internet access is needed for that install.
-
-Or run these commands from the project folder:
+Use Python 3.11 or newer. On Windows, double-click `run.bat`, or run:
 
 ```powershell
-python -m pip install -r requirements.txt
-python main.py
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
 ```
 
-On Linux or macOS:
+On Linux or macOS, run `sh run.sh`. The GUI requires a graphical desktop. Project calculations and report export also run from the terminal:
 
-```sh
-sh run.sh
+If another environment such as `pyoccenv` is active, launch through `run.bat`; it clears inherited Qt DLL paths before starting StackLab. Or deactivate that environment and use `.\.venv\Scripts\python.exe` explicitly. The project uses its own Python 3.11 environment; `python main.py` may select a different interpreter.
+
+```powershell
+.\.venv\Scripts\python.exe main.py examples\a-fixed-chain.stack1d --analyze --methods worst_case
+.\.venv\Scripts\python.exe main.py examples\e-statistical-chain.stack1d --analyze --methods worst_case,rss,monte_carlo --samples 30000 --seed 2026 --report report.pdf --csv report.csv --xlsx report.xlsx
 ```
 
-Tk must be available in your Python installation. Linux distributions may
-package it separately as `python3-tk`. The app runs offline after installation.
+`--requirement` selects one requirement ID; otherwise the CLI analyzes all requirements. `--sigma-level` sets the reported RSS interval. The CLI reports unsupported statistical assumptions as diagnostics instead of inventing results.
 
-## Sketch an assembly
+## Model an assembly
 
-1. Click **New**, choose **Profile**, and click your part's vertices. Draw
-   stepped, notched or other custom outlines. Click the first vertex to close,
-   or press **Enter / Finish sketch**. Choose **Open path** in the properties
-   dialog for an open outline. **Backspace** removes the last draft vertex;
-   **Escape** cancels the draft.
-2. Add more profiles. **Line** creates a segment between two points; clicking
-   an existing feature deliberately connects its endpoint. **Circle** takes
-   two clicks at its left and right edges and adds a center feature.
-   **Rectangle** retains the original body / housing tool. **Point** adds an
-   individual feature.
-3. Select **Dimension**, then click any **From** and **To** vertices, vertical
-   faces or circle features. Enter the nominal signed horizontal dimension,
-   lower deviation and upper deviation. **Click again to place the dimension
-   annotation**. In **Select** mode, drag a label to arrange it or double-click
-   it to edit its size and tolerances. **Add** in **Dims** also provides feature
-   dropdowns. You choose the dimensioning scheme: overall, chained, or from a
-   common feature. Inconsistent overconstraints are reported.
-4. Locate the parts with contacts, placement ranges or **Fit / float**.
-   Dimension an internal shoulder or hole relative to its own part's features
-   so it follows that part's assembly movement. Separate profiles create
-   independent part features even when initially drawn at the same position.
-5. Select **Gap**, then click its two features. The measured features may be
-   internal shoulders or circle edges, rather than a part's outer ends.
-   Define optional required limits.
-6. Switch **Assembly pose** between the reference, minimum-gap and maximum-gap
-   assemblies to see the actual positions producing each result.
+1. Use **Create Part** to add a component. **Add Face** places another axial face on its local profile. Reusable part definitions and individual instances appear in the assembly tree.
+2. Use **Dimension**, then select two faces. Enter the signed nominal separation, lower and upper deviations, a dimension role, and a process distribution. Driving dimensions update model geometry. Choose **New independent source** or reuse an existing source with a signed coefficient to link manufacturing effects across dimensions. Edit a source in the assembly tree to update every linked tolerance. Use **Correlate** to set a correlation between two sources. Reference and derived dimensions are informational; basic dimensions constrain nominal geometry without manufacturing variation. Bilateral, unilateral, and limit annotation styles are available.
+3. Use **Constraint** to fix any selected face at an axial coordinate, fix a part translation, align faces, set a fixed offset, or bound motion. The model can have several movable parts. **Centerline** creates a selectable axial datum marker; the same Dimension tool can dimension a face to this marker.
+4. Use **Contact** to mark compatible interface faces that cannot penetrate. A contact candidate enforces `x(second) >= x(first)`; it does not become active merely because two lines overlap on screen. Choose a **Position Policy** such as free movement, left or right seating, or centering between two opposing contacts.
+5. Use **Measure Gap**, then select the first and second functional faces. Set optional acceptance limits and select a positioning policy. **Analyze** computes the automatic dimensional chain and the selected methods. Selecting a result highlights its contributors on the sketch.
+6. Edit a dimension or tolerance in the tree or properties panel, then analyze again. Undo and redo are available with Ctrl+Z and Ctrl+Y. Use the wheel to zoom, middle-drag to pan, and Ctrl+0 to fit the assembly. Save as a `.stack1d` project and export a PDF, CSV, or XLSX report after analysis.
 
-Double-click a dimension, point, shape or fit to edit it. Right-click a point
-to set datum **A**. Use the wheel to zoom, middle-drag to pan, and **Fit view**
-to recenter. Undo/redo uses **Ctrl+Z / Ctrl+Y**.
+The nominal assembly coordinate is `global face x = instance translation + local face x`. Pixels never determine engineering dimensions. Sketch lane offsets distinguish components visually; contact lanes determine whether faces are mechanically compatible.
 
-All numeric inputs use **mm**. Both a decimal point and decimal comma are
-accepted. The canvas y-coordinate is layout only: this is a **1D x-axis**
-calculation, not a 2D geometric solver. Dimensional values are entered
-explicitly; sketch pixels do not replace a dimensional specification.
+## What the calculations mean
 
-### Sketch geometry and dimensions
+**Worst case** optimizes a functional gap over manufacturing deviation bounds and feasible assembly positions using linear programming. The reported minimum and maximum are the possible envelope for a free policy, or the extrema under the specified seating/centering policy. It reports manufacturing deviations, translations, and active contacts at each extreme. For the supplied fixed-chain example, `G = D1 − D2 − D3 = 1.00 mm`, with exact bounds **0.55–1.45 mm**.
 
-Vertices drawn at the same x-coordinate within a profile share an x-column.
-This keeps a vertical face vertical and lets you dimension either of its
-vertices. The circle center is constrained to be midway between its left and
-right edges. Dimensioning the diameter gives half its variation to a radius;
-dimensioning a radius drives twice that variation into the diameter.
-Dimension the center's position to locate a hole on its part.
+The floating-block example has a 100 ±0.20 mm housing, a 25 ±0.10 mm spacer, and a 40 ±0.15 mm block. Total clearance is **34.55–35.45 mm**. Its right-side gap is 0–35.45 mm if the block is free, 34.55–35.45 mm when left-seated, 0 mm when right-seated, and 17.275–17.725 mm when centered between the opposing contacts. Free movement has no single nominal position or probability distribution.
 
-These geometric relationships do not add hidden manufacturing tolerances.
-Unconnected or insufficiently dimensioned gap features remain unbounded.
-The outline is drawn in two screen directions, while **all analytical
-dimensions and movement remain along x**. A sloping line's dimension is its
-horizontal projection; rotations and angular variation are not solved.
-Fit constraints apply to the four selected faces; the app does not infer
-contacts or check 2D collision from the complete silhouettes.
+**RSS** computes an exact affine variance with independent or correlated manufacturing sources when the selected gap has a unique linear chain and assembly feasibility does not truncate the configured distributions. Specify a process standard deviation or a limit-to-sigma mapping for normal sources; drawing limits alone do not imply ±3σ. Correlated contributions use covariance allocation and may be negative. If contact switching or feasibility makes the affine statistical model invalid, the app reports why RSS is unavailable.
 
-Changing a dimension updates the reference sketch and gap analysis. Moving
-an annotation changes only the presentation. Saved files and HTML / SVG
-exports preserve the custom outlines and annotation positions.
+**Monte Carlo** samples manufacturing sources with a fixed seed, solves the feasible assembly for each sample, and separates valid assemblies from infeasible ones. It reports observed spread, percentiles, histogram, conditional specification failure, overall failure including assembly failures, PPM, and a confidence interval. A free-floating assembly needs a statistical positioning policy before a unique probability can be assigned to its gap. The solver never assigns a random floating position without such a policy.
 
-The **Stepped part + hole** example measures an internal shoulder in a
-40 ±0.2 mm frame. Its part width is 34 ±0.1 mm and its shoulder is
-24 ±0.05 mm from the part's left face:
+## Example projects
 
-| Assembly condition | Minimum shoulder gap | Maximum shoulder gap |
-| --- | ---: | ---: |
-| Free | 9.850 mm | 16.250 mm |
-| Left seated | 15.750 mm | 16.250 mm |
-| Right seated | 9.850 mm | 10.150 mm |
-| Centered | 12.800 mm | 13.200 mm |
+| File | Purpose | Reference check |
+| --- | --- | --- |
+| `examples/a-fixed-chain.stack1d` | Three-dimension fixed chain | nominal 1.00, worst case 0.55–1.45 mm |
+| `examples/b-floating-block.stack1d` | Spacer, moving block, opposing contacts | total clearance 34.55–35.45 mm |
+| `examples/c-coupled-floating.stack1d` | Two coupled moving blocks | left-seated rear gap 49.55–50.45 mm |
+| `examples/d-inconsistent-loop.stack1d` | Conflicting driving dimensions | infeasibility diagnostic |
+| `examples/e-statistical-chain.stack1d` | Explicit normal process standard deviations | analytical RSS variance checked against simulation |
 
-The free minimum is `minimum part width − maximum shoulder offset`.
-The free maximum is `maximum frame width − minimum shoulder offset`.
-The solver keeps those dimensions and the shared assembly position coupled.
+The inconsistent-loop project is intentionally invalid for analysis; it can still be opened for inspection and repair.
 
-### Dimension types
+## Project format and architecture
 
-| Type | Use |
-| --- | --- |
-| Manufacturing size | A signed dimensional specification and its manufacturing deviations. |
-| Assembly placement / float | A bounded relative position, for example a mounting position of 10 mm with movement from −0.5 to +0.5 mm. |
-| Face contact | Zero separation between two separate face points. |
+`.stack1d` is a versioned ZIP archive containing `engineering.json`, `presentation.json`, and `manifest.json`. Saves use a temporary file and atomic replacement. Version-1 project archives migrate on load. Malformed files produce a readable error. The engineering model is independent of sketch zoom, pan, and annotation layout.
 
-For a dimension from A to B:
+`stacklab/domain.py` defines persistent entities. `stacklab/compiler.py` checks references, dimensions, connectivity, and feasibility, then creates numerical constraint matrices. `stacklab/solvers.py` generates the dimensional chain and runs worst-case, RSS, and Monte Carlo analysis. `stacklab/services.py` provides commands, undo/redo, revision tracking, cached results, and cancellable background analysis. `stacklab/ui/` contains the PySide6 sketch and workspace. `stacklab/persistence.py` and `stacklab/reporting.py` handle projects and exports.
 
-```text
-nominal + lower deviation ≤ x(B) − x(A) ≤ nominal + upper deviation
+## Validate and package
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\scripts\build_windows.ps1
 ```
 
-For a conventional 25 ±0.1 mm dimension, enter nominal `25`, lower `-0.1`,
-upper `0.1`. For a reversed signed dimension, select the endpoints accordingly
-and use a negative nominal value.
+The Windows build creates `dist\StackLab1D\StackLab1D.exe`; distribute its whole directory. See [Windows packaging](docs/windows-packaging.md) for the build environment and bundled example location.
 
-### Assembly fits and shift
-
-Select four distinct points in **Fit / float**: the slot's left/right limits
-and the moving body's left/right faces. Dimension both widths.
-
-| Fit condition | What is enforced |
-| --- | --- |
-| Free float | The body stays within the slot and may translate until either wall is contacted. |
-| Left face in contact | The body is seated against the left wall. |
-| Right face in contact | The body is seated against the right wall. |
-| Centered | Left and right gaps are equal; the centering condition holds at every permitted size. |
-
-The free-fit constraints are:
-
-```text
-slot_left ≤ body_left ≤ body_right ≤ slot_right
-```
-
-Manufacturing dimensions and these assembly positions are solved together.
-The available float therefore changes with the actual part sizes. Shared face
-positions are reused across all relations, preserving cancellation and coupling.
-Additional features on the moving part must be connected by dimensions to
-its existing faces; this connects them to the same movement.
-
-**Checked example:** a slot of **40 ±0.2 mm** and a body of **34 ±0.1 mm**.
-
-| Assembly condition | Right-side minimum gap | Right-side maximum gap |
-| --- | ---: | ---: |
-| Free | 0.000 mm | 6.300 mm |
-| Left seated | 5.700 mm | 6.300 mm |
-| Right seated | 0.000 mm | 0.000 mm |
-| Centered | 2.850 mm | 3.150 mm |
-
-Total size clearance is **5.7–6.3 mm**. In a centered nominal reference pose,
-free movement at nominal sizes is **−3 to +3 mm**. The full gap extremes also
-include the influence of the size tolerances on the available movement.
-
-The **reference** result uses nominal manufacturing sizes and chooses a
-feasible assembly position as close as possible to the requested sketch.
-It is one selected pose, not a statistical average. Dragging a free body
-requests another reference pose; it does not change the specified dimensions
-or the worst-case gap limits. Each fit's reported shift is measured from this
-reference pose relative to the slot's left face, at nominal manufacturing sizes.
-
-## Understand the result
-
-- **Gap within requirements:** all feasible gap values satisfy the entered gap
-  limits. This statement alone does not certify production assembly yield.
-- **Size fit risk:** some permitted slot/body size combinations interfere.
-  The app checks size clearance before imposing containment so these failures
-  remain visible, even when the gap for compatible assemblies passes.
-- **Unbounded:** the two gap faces are not sufficiently located relative to
-  each other. Add a contact, placement range, connecting dimension or fit.
-- **Infeasible:** no assembly satisfies all the declared relations. A small
-  set of conflicting conditions is listed.
-
-The gap extrema cover **feasible assemblies**. The size-clearance check
-audits each fit independently. Multiple coupled fits, closed dimensional
-loops or other restrictive contacts may exclude additional manufactured
-combinations; this app does **not** certify that every allowed combination
-can be assembled in such a system.
-
-The model handles 1D linear dimensions, stated contacts and translational
-freedom. Rotation, angular/form errors, elastic deformation and full 2D/3D
-GD&T are outside its scope. There is no assumed probability distribution,
-RSS approximation or assembly failure-rate estimate.
-
-## Save and export
-
-- **Save** creates a portable `.stackup.json` project. Writes are atomic.
-  Version 1.1 reads older schema-1 projects and saves schema 2, which includes
-  custom outlines and dimension placement. Use the updated app for new files.
-- **Export report → HTML** produces a self-contained report with all three
-  assembly sketches, extrema, dimensions, fit clearance and movement.
-  Open it in a browser and print to PDF if desired.
-- **CSV** exports dimensions, actual dimensions at both gap extremes, fit
-  movement and result notes.
-- **SVG** exports the currently displayed vector sketch.
-
-Six examples are available in the app and in the `examples/` folder:
-stepped part with a hole, floating block, centered block, serial chain,
-mounting float, and a partial fit/interference case.
-
-## Command-line analysis
-
-```sh
-python main.py examples/floating-block.stackup.json --analyze
-python main.py examples/floating-block.stackup.json --analyze --report report.html
-```
-
-CLI exit code `0` means analysis completed with bounded gap limits; it does not
-mean the gap passes the requirements or that every size combination fits.
-Infeasible, incomplete or unbounded analysis returns `2`; file/startup errors
-return `1`.
-
-## Validation
-
-```sh
-python -m unittest discover -s tests -v
-```
-
-Tests check signed and asymmetric chains, shared-face cancellation,
-clearance-dependent float, contact and centered conditions, internal features,
-reference-pose changes, interference, unbounded and inconsistent models,
-custom vertical faces, circle diameter / radius coupling, connected lines,
-legacy project migration, persistence, exports, annotation placement and
-interactive sketch/edit/undo workflows.
-The GUI test requires a display; it is skipped on a headless machine.
-
-SciPy's HiGHS linear-programming solver computes the gap extrema. Feature
-coordinates are allowed to be negative; no unintended non-negative coordinate
-bounds are imposed. Solver feasibility tolerance is `1e-9` mm; requirement
-comparisons use `1e-7` mm to handle floating-point roundoff.
-
-Primary references used for the calculation approach:
-
-- [SciPy: `linprog` and its constraint/bound conventions](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linprog.html)
-- [MIT Robust System Design: tolerance analysis](https://ocw.mit.edu/courses/16-881-robust-system-design-summer-1998/725e6afee0f0698780362e394cd2dac7_l15_tol_des3.pdf)
-
-This implementation formulates the stated 1D assembly relations as linear
-constraints. The references explain the underlying tools and tolerance-analysis
-context; they are not a certification of this application.
+StackLab models one axial coordinate with rigid parts, linear dimensions, translations, and declared contacts. Rotation, elastic deformation, form errors, and full 2D/3D GD&T are outside this model. Horizontal/vertical/parallel/perpendicular sketch constraints require a two-dimensional geometry kernel and do not have independent meaning in a strict 1D analysis. Centerlines here are selectable axial datum planes. Centered placement is solved exactly for a single moving component between two ordered opposing contacts; more general coupled centering and closest-position worst-case requests are diagnosed when unsupported. Engineering results must be reviewed against the real contact and process assumptions of the design.
