@@ -82,6 +82,23 @@ class Dimension:
     source_id: str | None = None
     coefficient: float = 1.0
     display_style: str = "bilateral"  # bilateral, unilateral, limits
+    show_on_sketch: bool = False
+
+
+@dataclass
+class SketchDimension:
+    """A 2D sketch distance; axial tolerances use Dimension instead."""
+
+    id: str
+    name: str
+    definition_id: str
+    kind: str  # line_length, point_distance, line_spacing
+    first_outline_id: str
+    first_index: int
+    second_outline_id: str | None = None
+    second_index: int | None = None
+    nominal: float = 0.0
+    driving: bool = True
 
 
 @dataclass
@@ -281,6 +298,7 @@ class Project:
     definitions: list[PartDefinition] = field(default_factory=list)
     instances: list[PartInstance] = field(default_factory=list)
     dimensions: list[Dimension] = field(default_factory=list)
+    sketch_dimensions: list[SketchDimension] = field(default_factory=list)
     sources: list[VariationSource] = field(default_factory=list)
     constraints: list[AssemblyConstraint] = field(default_factory=list)
     contacts: list[ContactPair] = field(default_factory=list)
@@ -313,6 +331,7 @@ class Project:
                              for o in d.get("outlines", [])]}) for d in value.get("definitions", [])]
             dimensions = [Dimension(**{**d, "first": ref(d["first"]), "second": ref(d["second"]),
                                        "tolerance": Tolerance(**d.get("tolerance", {}))}) for d in value.get("dimensions", [])]
+            sketch_dimensions = [SketchDimension(**d) for d in value.get("sketch_dimensions", [])]
             constraints = [AssemblyConstraint(**{**c, "first": ref(c.get("first")), "second": ref(c.get("second"))}) for c in value.get("constraints", [])]
             contacts = [ContactPair(**{**c, "first": ref(c["first"]), "second": ref(c["second"])}) for c in value.get("contacts", [])]
             requirements = [FunctionalRequirement(**{**r, "first": ref(r["first"]), "second": ref(r["second"])}) for r in value.get("requirements", [])]
@@ -321,6 +340,7 @@ class Project:
             project = cls(
                 id=value["id"], name=value["name"], unit=value.get("unit", "mm"), definitions=definitions,
                 instances=[PartInstance(**i) for i in value.get("instances", [])], dimensions=dimensions,
+                sketch_dimensions=sketch_dimensions,
                 sources=[VariationSource(**s) for s in value.get("sources", [])], constraints=constraints,
                 contacts=contacts, requirements=requirements, policies=policies,
                 correlations=[Correlation(**c) for c in value.get("correlations", [])],

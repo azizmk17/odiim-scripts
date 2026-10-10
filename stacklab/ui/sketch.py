@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QBrush, QFont, QPainter, QPainterPath, QPen, Q
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView
 
 from stacklab.domain import FaceRef, Project
+from stacklab.sketch_dimensions import GeometryPick, measure_sketch_dimension
 
 
 SCALE = 6.0  # screen scene units per model millimetre; never used by a solver
@@ -25,6 +26,8 @@ class SketchView(QGraphicsView):
     outline_finished = Signal(object, object, bool)  # instance ID, scene vertices, closed
     outline_cancelled = Signal()
     point_clicked = Signal(object)
+    geometry_clicked = Signal(object)
+    tool_cancelled = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -57,6 +60,8 @@ class SketchView(QGraphicsView):
         self._draft_hover: QPointF | None = None
         self._draft_item = None
         self._picking_point = False
+        self._dimension_mode = False
+        self._geometry_highlights: list[GeometryPick] = []
 
     @property
     def grid_visible(self) -> bool:
@@ -83,6 +88,15 @@ class SketchView(QGraphicsView):
         self._selected = selected
         self._selected_faces = faces or set()
         self._chain_dimensions = dimensions or set()
+        self.rebuild()
+
+    def set_dimension_mode(self, active: bool) -> None:
+        self._dimension_mode = active
+        self._geometry_highlights.clear()
+        self.rebuild()
+
+    def set_dimension_picks(self, picks: list[GeometryPick]) -> None:
+        self._geometry_highlights = list(picks)
         self.rebuild()
 
     def _x(self, instance, face) -> float:
@@ -178,6 +192,30 @@ class SketchView(QGraphicsView):
                     body.setData(0, "outline")
                     body.setData(1, outline_key)
                     body.setZValue(1)
+                    if self._dimension_mode:
+                        rendered = [QPointF(self._vertex_x(instance, definition, vertex),
+                                            y + vertex.y * SCALE) for vertex in outline.vertices]
+                        for index, point in enumerate(rendered):
+                            pick = GeometryPick("vertex", instance.id, definition.id, outline.id, index)
+                            selected_pick = pick in self._geometry_highlights
+                            marker = scene.addEllipse(point.x() - 5, point.y() - 5, 10, 10,
+                                QPen(QColor("#e47728" if selected_pick else "#247ba6"), 2),
+                                QBrush(QColor("#fff2d9" if selected_pick else "#ffffff")))
+                            marker.setData(0, "sketch_vertex")
+                            marker.setData(1, f"{outline_key}:{index}")
+                            marker.setToolTip(f"Vertex {index + 1}: click for a dimension")
+                            marker.setZValue(7)
+                        count = len(rendered) if outline.closed else len(rendered) - 1
+                        for index in range(count):
+                            pick = GeometryPick("segment", instance.id, definition.id, outline.id, index)
+                            start, end = rendered[index], rendered[(index + 1) % len(rendered)]
+                            if pick in self._geometry_highlights:
+                                scene.addLine(QLineF(start, end), QPen(QColor("#e47728"), 4)).setZValue(5)
+                            hit = scene.addLine(QLineF(start, end), QPen(QColor(25, 90, 160, 1), 12))
+                            hit.setData(0, "sketch_segment")
+                            hit.setData(1, f"{outline_key}:{index}")
+                            hit.setToolTip(f"Line {index + 1}: click for a dimension")
+                            hit.setZValue(6)
             else:
                 # Face coordinates are axial model data. The stepped band is a
                 # presentation cue for successive profile sections.
@@ -242,9 +280,57 @@ class SketchView(QGraphicsView):
                     name.setData(0, "face")
                     name.setData(1, f"{instance.id}:{face.id}")
 
+        for sketch_dimension in project.sketch_dimensions:
+            definition = defs.get(sketch_dimension.definition_id)
+            if definition is None:
+                continue
+            try:
+                measured = measure_sketch_dimension(definition, sketch_dimension)
+            except (ValueError, KeyError, IndexError):
+                continue
+            for instance in visible:
+                if instance.definition_id != definition.id:
+                    continue
+                row_y = self._part_rows.get(instance.id)
+                if row_y is None:
+                    continue
+                outlines = {outline.id: outline for outline in definition.outlines}
+                def point(outline_id: str, index: int) -> QPointF:
+                    vertex = outlines[outline_id].vertices[index]
+                    return QPointF(self._vertex_x(instance, definition, vertex), row_y + vertex.y * SCALE)
+                first_outline = outlines[sketch_dimension.first_outline_id]
+                a = point(first_outline.id, sketch_dimension.first_index)
+                if sketch_dimension.kind == "line_length":
+                    b = point(first_outline.id, (sketch_dimension.first_index + 1) % len(first_outline.vertices))
+                elif sketch_dimension.kind == "point_distance":
+                    b = point(sketch_dimension.second_outline_id, sketch_dimension.second_index)
+                else:
+                    second_outline = outlines[sketch_dimension.second_outline_id]
+                    i = sketch_dimension.first_index
+                    j = sketch_dimension.second_index
+                    a2 = point(first_outline.id, (i + 1) % len(first_outline.vertices))
+                    b = point(second_outline.id, j)
+                    b2 = point(second_outline.id, (j + 1) % len(second_outline.vertices))
+                    a = (a + a2) / 2
+                    b = (b + b2) / 2
+                mid = (a + b) / 2
+                label = scene.addText(f"{sketch_dimension.name}: {measured:.3f} {project.unit}")
+                label.setDefaultTextColor(QColor("#5e53a6"))
+                label.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
+                label.setFlag(QGraphicsItem.ItemIgnoresTransformations)
+                label.setPos(mid.x() + 8, mid.y() - 27)
+                label.setData(0, "sketch_dimension")
+                label.setData(1, sketch_dimension.id)
+                line = scene.addLine(QLineF(a, b), QPen(QColor("#7268ae"), 1.5, Qt.DashLine))
+                line.setData(0, "sketch_dimension")
+                line.setData(1, sketch_dimension.id)
+                line.setZValue(2)
+                all_y.append(mid.y() - 30)
+
         dim_row = 0
         for dimension in project.dimensions:
-            if profile_mode and dimension.id not in self._chain_dimensions and self._selected != ("dimension", dimension.id):
+            if (profile_mode and not dimension.show_on_sketch and
+                dimension.id not in self._chain_dimensions and self._selected != ("dimension", dimension.id)):
                 continue
             a = self._face_positions.get((dimension.first.instance_id, dimension.first.face_id))
             b = self._face_positions.get((dimension.second.instance_id, dimension.second.face_id))
@@ -454,6 +540,15 @@ class SketchView(QGraphicsView):
                 self.finish_outline()
             event.accept()
             return
+        if self._dimension_mode and event.button() == Qt.LeftButton:
+            for item in self.items(event.position().toPoint()):
+                if item.data(0) in {"sketch_vertex", "sketch_segment"}:
+                    instance_id, definition_id, outline_id, index = str(item.data(1)).split(":")
+                    kind = "vertex" if item.data(0) == "sketch_vertex" else "segment"
+                    self.geometry_clicked.emit(GeometryPick(kind, instance_id, definition_id,
+                                                            outline_id, int(index)))
+                    event.accept()
+                    return
         if event.button() == Qt.LeftButton:
             self._mouse_start = event.pos()
             picked = self._entity_at(event.pos())
@@ -534,6 +629,10 @@ class SketchView(QGraphicsView):
         event.accept()
 
     def keyPressEvent(self, event) -> None:
+        if self._dimension_mode and event.key() == Qt.Key_Escape:
+            self.tool_cancelled.emit()
+            event.accept()
+            return
         if self._picking_point and event.key() == Qt.Key_Escape:
             self.cancel_pick_point()
             self.outline_cancelled.emit()

@@ -42,14 +42,18 @@ from PySide6.QtWidgets import (
 
 from stacklab.domain import (
     AnalysisCase, AssemblyConstraint, AssemblyPolicy, ContactPair, Correlation, Dimension, Face, FaceRef,
-    FunctionalRequirement, Outline, PartDefinition, PartInstance, SketchVertex, Tolerance,
+    FunctionalRequirement, Outline, PartDefinition, PartInstance, SketchDimension, SketchVertex, Tolerance,
     VariationSource, new_id,
 )
 from stacklab.services import ProjectService, StaleAnalysis
+from stacklab.sketch_dimensions import (GeometryPick, measure_sketch_dimension,
+                                        parallel_line_spacing, segment_points,
+                                        set_sketch_dimension_value, vertex_point)
 
 from .dialogs import (
     AnalysisSettingsDialog, ConstraintDialog, ContactDialog, CorrelationDialog, DimensionDialog,
-    FaceDialog, InstanceDialog, OutlineDialog, PartDialog, PolicyDialog, RequirementDialog, SourceDialog,
+    FaceDialog, InstanceDialog, OutlineDialog, PartDialog, PolicyDialog, RequirementDialog,
+    SketchDimensionDialog, SourceDialog,
 )
 from .sketch import SCALE, TRACK, SketchView
 
@@ -70,6 +74,7 @@ class MainWindow(QMainWindow):
         self._selected: tuple[str, str] | None = None
         self._tool: str | None = None
         self._picked_faces: list[FaceRef] = []
+        self._picked_geometry: list[GeometryPick | FaceRef] = []
         self._busy = False
         self._future = None
         self._fit_on_show = True
@@ -121,7 +126,9 @@ class MainWindow(QMainWindow):
         self.face_action = self._action("Add Face", self.add_face, tip="Add an axial feature to a part")
         self.centerline_action = self._action("Centerline", self.add_centerline,
                                               tip="Add a fixed axial reference line for point-to-line dimensions")
-        self.dimension_action = self._action("Dimension", lambda: self._set_tool("dimension"), tip="Select two faces to add a dimension", checkable=True)
+        self.dimension_action = self._action("Dimension", lambda: self._set_tool(
+            None if self._tool == "dimension" else "dimension"),
+            tip="Click one line for length, two vertices for distance, or two parallel lines for spacing", checkable=True)
         self.constraint_action = self._action("Constraint", self.add_constraint, tip="Define grounding, alignment or bounded movement")
         self.contact_action = self._action("Contact", lambda: self._set_tool("contact"), tip="Select two compatible faces as a candidate contact", checkable=True)
         self.policy_action = self._action("Position Policy", self.add_policy, tip="Define how floating parts are positioned")
@@ -207,6 +214,8 @@ class MainWindow(QMainWindow):
         self.sketch.outline_finished.connect(self._outline_finished)
         self.sketch.outline_cancelled.connect(self._sketch_cancelled)
         self.sketch.point_clicked.connect(self._point_clicked)
+        self.sketch.geometry_clicked.connect(self._geometry_clicked)
+        self.sketch.tool_cancelled.connect(lambda: self._set_tool(None))
         splitter.addWidget(self.sketch)
 
         right = QWidget()
@@ -358,6 +367,7 @@ class MainWindow(QMainWindow):
                     self._item(item, face.name, "face", f"{instance.id}:{face.id}")
         for label, kind, sequence in (
             ("Dimensions", "dimension", project.dimensions),
+            ("Sketch dimensions", "sketch_dimension", project.sketch_dimensions),
             ("Manufacturing sources", "source", project.sources),
             ("Source correlations", "correlation", project.correlations),
             ("Constraints", "constraint", project.constraints),
@@ -484,7 +494,8 @@ class MainWindow(QMainWindow):
             definition = next((d for d in project.definitions if d.id == owner_id), None)
             return next((item for item in definition.outlines if item.id == outline_id), None) if definition else None
         mapping = {"definition": project.definitions, "instance": project.instances,
-                   "dimension": project.dimensions, "constraint": project.constraints,
+                   "dimension": project.dimensions, "sketch_dimension": project.sketch_dimensions,
+                   "constraint": project.constraints,
                    "contact": project.contacts, "policy": project.policies,
                    "requirement": project.requirements, "source": project.sources,
                    "correlation": project.correlations}
@@ -842,9 +853,13 @@ class MainWindow(QMainWindow):
         self.sketch.cancel_pick_point()
         self._tool = tool
         self._picked_faces.clear()
+        self._picked_geometry.clear()
+        self.sketch.set_dimension_mode(tool == "dimension")
         for name, action in (("dimension", self.dimension_action), ("contact", self.contact_action), ("gap", self.gap_action)):
             action.setChecked(name == tool)
-        if tool:
+        if tool == "dimension":
+            self.status_label.setText("Dimension: click a line, two vertices, two parallel lines, or a vertex and centerline")
+        elif tool:
             self.status_label.setText(f"{tool.title()}: select the first face, then the second face")
         else:
             self.status_label.setText("Ready")
@@ -852,6 +867,9 @@ class MainWindow(QMainWindow):
 
     def _face_clicked(self, reference: FaceRef) -> None:
         if self._tool is None:
+            return
+        if self._tool == "dimension":
+            self._dimension_selection(reference)
             return
         if reference in self._picked_faces:
             self.status_label.setText("Choose a different second face")
@@ -871,18 +889,183 @@ class MainWindow(QMainWindow):
         elif tool == "gap":
             self._create_requirement(first, second)
 
-    def _create_dimension(self, first: FaceRef, second: FaceRef) -> None:
+    def _geometry_clicked(self, pick: GeometryPick) -> None:
+        if self._tool == "dimension":
+            self._dimension_selection(pick)
+
+    def _dimension_selection(self, pick: GeometryPick | FaceRef) -> None:
+        if not self._picked_geometry:
+            if isinstance(pick, GeometryPick) and pick.kind == "segment":
+                choice, ok = QInputDialog.getItem(
+                    self, "Dimension line", "What should this line dimension measure?",
+                    ["Length of this line", "Spacing to another line"], 0, False)
+                if not ok:
+                    self._set_tool(None)
+                    return
+                if choice == "Length of this line":
+                    self._set_tool(None)
+                    self._create_geometry_dimension([pick])
+                    return
+            self._picked_geometry.append(pick)
+            if isinstance(pick, GeometryPick):
+                self.sketch.set_dimension_picks([pick])
+            self.status_label.setText("Select the second line, vertex, or reference face")
+            return
+        first = self._picked_geometry[0]
+        if pick == first:
+            self.status_label.setText("Choose a different second feature")
+            return
+        if isinstance(first, GeometryPick) and first.kind == "segment":
+            compatible = isinstance(pick, GeometryPick) and pick.kind == "segment"
+        else:
+            compatible = isinstance(pick, FaceRef) or (isinstance(pick, GeometryPick) and pick.kind == "vertex")
+        if not compatible:
+            self.status_label.setText("Select the same kind of feature for this dimension")
+            return
+        self._set_tool(None)
+        self._create_geometry_dimension([first, pick])
+
+    def _create_geometry_dimension(self, picks: list[GeometryPick | FaceRef]) -> None:
+        project = self.service.project
+        definitions = {definition.id: definition for definition in project.definitions}
+        if len(picks) == 1:
+            segment = picks[0]
+            definition = definitions[segment.definition_id]
+            a, b = segment_points(definition, segment)
+            if abs(a[1] - b[1]) < 1e-6 and abs(a[0] - b[0]) > 1e-9:
+                outline = next(o for o in definition.outlines if o.id == segment.outline_id)
+                second = GeometryPick("vertex", segment.instance_id, segment.definition_id,
+                                      segment.outline_id, (segment.index + 1) % len(outline.vertices))
+                first = GeometryPick("vertex", segment.instance_id, segment.definition_id,
+                                     segment.outline_id, segment.index)
+                self._create_axial_geometry_dimension([first, second])
+            else:
+                self._create_sketch_dimension("line_length", segment)
+            return
+        first, second = picks
+        if isinstance(first, FaceRef) or isinstance(second, FaceRef):
+            self._create_axial_geometry_dimension([first, second])
+            return
+        if first.kind == "vertex":
+            a = vertex_point(definitions[first.definition_id], first)
+            b = vertex_point(definitions[second.definition_id], second)
+            if first.instance_id != second.instance_id or (abs(a[1] - b[1]) < 1e-6 and
+                                                             abs(a[0] - b[0]) > 1e-9):
+                self._create_axial_geometry_dimension([first, second])
+            else:
+                self._create_sketch_dimension("point_distance", first, second)
+            return
+        a = segment_points(definitions[first.definition_id], first)
+        b = segment_points(definitions[second.definition_id], second)
+        try:
+            parallel_line_spacing(a, b)
+        except ValueError as exc:
+            self._error("Dimension between lines", exc)
+            return
+        vertical = abs(a[0][0] - a[1][0]) < 1e-6 and abs(b[0][0] - b[1][0]) < 1e-6
+        if vertical and abs(a[0][0] - b[0][0]) > 1e-9:
+            first_vertex = GeometryPick("vertex", first.instance_id, first.definition_id,
+                                        first.outline_id, first.index)
+            second_vertex = GeometryPick("vertex", second.instance_id, second.definition_id,
+                                         second.outline_id, second.index)
+            self._create_axial_geometry_dimension([first_vertex, second_vertex], vertical_lines=[first, second])
+        else:
+            self._create_sketch_dimension("line_spacing", first, second)
+
+    def _create_sketch_dimension(self, kind: str, first: GeometryPick,
+                                 second: GeometryPick | None = None) -> None:
+        if second is not None and (first.instance_id != second.instance_id or
+                                   first.definition_id != second.definition_id):
+            self._error("Sketch dimension", ValueError(
+                "2D sketch dimensions need two features on the same part instance"))
+            return
+        definition = next(d for d in self.service.project.definitions if d.id == first.definition_id)
+        identifier = new_id("sketch-dimension")
+        measure = SketchDimension(identifier, f"SD{len(self.service.project.sketch_dimensions) + 1}",
+                                  first.definition_id, kind, first.outline_id, first.index,
+                                  second.outline_id if second else None,
+                                  second.index if second else None)
+        measure.nominal = measure_sketch_dimension(definition, measure)
+        dialog = SketchDimensionDialog(measure.name, measure.nominal, self.service.project.unit,
+                                       parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        measure.name = dialog.name.text().strip()
+        measure.driving = dialog.driving.isChecked()
+        target = dialog.value.value()
+        def change(project):
+            owner = next(d for d in project.definitions if d.id == measure.definition_id)
+            item = SketchDimension(**vars(measure))
+            if item.driving:
+                set_sketch_dimension_value(owner, item, target)
+            else:
+                item.nominal = target
+            project.sketch_dimensions.append(item)
+        if self._command(change, f"Added sketch dimension {measure.name}"):
+            self._select_entity("sketch_dimension", identifier)
+
+    def _create_axial_geometry_dimension(self, picks: list[GeometryPick | FaceRef],
+                                          vertical_lines: list[GeometryPick] | None = None) -> None:
+        staged = self.service.project.copy()
+        preparations: list[tuple[str, str, int, Face | None, str]] = []
+        instances = {instance.id: instance for instance in staged.instances}
+        definitions = {definition.id: definition for definition in staged.definitions}
+
+        def ensure(pick: GeometryPick | FaceRef) -> FaceRef:
+            if isinstance(pick, FaceRef):
+                return pick
+            definition = definitions[pick.definition_id]
+            outline = next(item for item in definition.outlines if item.id == pick.outline_id)
+            vertex = outline.vertices[pick.index]
+            if vertex.face_id is None:
+                face = Face(new_id("face"), f"{outline.name} vertex {pick.index + 1}",
+                            vertex.x, local_y=vertex.y)
+                definition.faces.append(face)
+                vertex.face_id = face.id
+                preparations.append((definition.id, outline.id, pick.index, face, face.id))
+            return FaceRef(pick.instance_id, vertex.face_id)
+
+        refs = [ensure(pick) for pick in picks]
+        if vertical_lines:
+            for line, ref in zip(vertical_lines, refs):
+                definition = definitions[line.definition_id]
+                outline = next(item for item in definition.outlines if item.id == line.outline_id)
+                end = (line.index + 1) % len(outline.vertices)
+                vertex = outline.vertices[end]
+                if vertex.face_id is None:
+                    vertex.face_id = ref.face_id
+                    preparations.append((definition.id, outline.id, end, None, ref.face_id))
+
+        def x(reference: FaceRef) -> float:
+            instance = instances[reference.instance_id]
+            definition = definitions[instance.definition_id]
+            face = next(item for item in definition.faces if item.id == reference.face_id)
+            return instance.translation + face.local_x
+
+        if refs[0] == refs[1]:
+            self._error("Dimension", ValueError("Choose two different sketch features"))
+            return
+        if x(refs[0]) > x(refs[1]):
+            refs.reverse()
+        self._create_dimension(refs[0], refs[1], staged_project=staged,
+                               pending_bindings=preparations)
+
+    def _create_dimension(self, first: FaceRef, second: FaceRef, *, staged_project=None,
+                          pending_bindings: list[tuple[str, str, int, Face | None, str]] | None = None) -> None:
         existing = next((dimension for dimension in self.service.project.dimensions
                          if (dimension.first, dimension.second) in {(first, second), (second, first)}), None)
         if existing:
             self._select_entity("dimension", existing.id)
             self._edit_dimension(existing)
             return
-        dialog = DimensionDialog(self.service.project, first, second, parent=self)
-        first_face = self._entity("face", f"{first.instance_id}:{first.face_id}")
-        second_face = self._entity("face", f"{second.instance_id}:{second.face_id}")
-        first_part = self._entity("instance", first.instance_id)
-        second_part = self._entity("instance", second.instance_id)
+        model = staged_project or self.service.project
+        dialog = DimensionDialog(model, first, second, parent=self)
+        first_part = next((item for item in model.instances if item.id == first.instance_id), None)
+        second_part = next((item for item in model.instances if item.id == second.instance_id), None)
+        first_definition = next((item for item in model.definitions if first_part and item.id == first_part.definition_id), None)
+        second_definition = next((item for item in model.definitions if second_part and item.id == second_part.definition_id), None)
+        first_face = next((item for item in first_definition.faces if item.id == first.face_id), None) if first_definition else None
+        second_face = next((item for item in second_definition.faces if item.id == second.face_id), None) if second_definition else None
         if first_face and second_face and first_part and second_part:
             dialog.nominal.setValue((second_part.translation + second_face.local_x) -
                                     (first_part.translation + first_face.local_x))
@@ -892,10 +1075,16 @@ class MainWindow(QMainWindow):
         data = self._dimension_values(dialog)
         source_id = (data["source_id"] or new_id("source")) if data["kind"] == "driving" else None
         def change(project):
+            for definition_id, outline_id, index, face, face_id in pending_bindings or []:
+                definition = next(item for item in project.definitions if item.id == definition_id)
+                if face is not None:
+                    definition.faces.append(Face(**vars(face)))
+                outline = next(item for item in definition.outlines if item.id == outline_id)
+                outline.vertices[index].face_id = face_id
             project.dimensions.append(Dimension(dimension_id, data["name"], data["first"], data["second"],
                                                 data["nominal"], Tolerance(data["lower"], data["upper"]),
                                                 data["kind"], source_id, data["coefficient"],
-                                                display_style=data["display_style"]))
+                                                display_style=data["display_style"], show_on_sketch=True))
             if source_id and data["source_id"] is None:
                 lo, hi = sorted((data["lower"] / data["coefficient"],
                                  data["upper"] / data["coefficient"]))
@@ -1038,6 +1227,8 @@ class MainWindow(QMainWindow):
             self._edit_outline(identifier, entity)
         elif kind == "dimension":
             self._edit_dimension(entity)
+        elif kind == "sketch_dimension":
+            self._edit_sketch_dimension(entity)
         elif kind == "constraint":
             self._edit_constraint(entity)
         elif kind == "contact":
@@ -1124,6 +1315,26 @@ class MainWindow(QMainWindow):
             if old_source_id and old_source_id != source_id:
                 self._drop_unused_source(project, old_source_id)
         self._command(change, "Edited dimension")
+
+    def _edit_sketch_dimension(self, dimension: SketchDimension) -> None:
+        definition = next(d for d in self.service.project.definitions if d.id == dimension.definition_id)
+        current = measure_sketch_dimension(definition, dimension)
+        dialog = SketchDimensionDialog(dimension.name, current, self.service.project.unit,
+                                       driving=dimension.driving, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        identifier = dimension.id
+        target = dialog.value.value()
+        def change(project):
+            item = next(d for d in project.sketch_dimensions if d.id == identifier)
+            item.name = dialog.name.text().strip()
+            item.driving = dialog.driving.isChecked()
+            owner = next(d for d in project.definitions if d.id == item.definition_id)
+            if item.driving:
+                set_sketch_dimension_value(owner, item, target)
+            else:
+                item.nominal = target
+        self._command(change, "Edited sketch dimension")
 
     def _edit_source(self, source) -> None:
         dialog = SourceDialog(source, self)
@@ -1257,6 +1468,7 @@ class MainWindow(QMainWindow):
             removed_instances = {i.id for i in project.instances if i.definition_id == identifier}
             project.instances = [i for i in project.instances if i.id not in removed_instances]
             project.definitions = [d for d in project.definitions if d.id != identifier]
+            project.sketch_dimensions = [d for d in project.sketch_dimensions if d.definition_id != identifier]
         elif kind in {"face", "definition_face"}:
             owner_id, face_id = identifier.split(":", 1)
             if kind == "face":
@@ -1272,8 +1484,13 @@ class MainWindow(QMainWindow):
             definition_id, outline_id = identifier.split(":")[-2:]
             definition = next(d for d in project.definitions if d.id == definition_id)
             definition.outlines = [item for item in definition.outlines if item.id != outline_id]
+            project.sketch_dimensions = [d for d in project.sketch_dimensions
+                                         if not (d.definition_id == definition_id and
+                                                 outline_id in {d.first_outline_id, d.second_outline_id})]
         elif kind == "dimension":
             project.dimensions = [d for d in project.dimensions if d.id != identifier]
+        elif kind == "sketch_dimension":
+            project.sketch_dimensions = [d for d in project.sketch_dimensions if d.id != identifier]
         elif kind == "source":
             for dimension in project.dimensions:
                 if dimension.source_id == identifier:
@@ -1297,6 +1514,9 @@ class MainWindow(QMainWindow):
         elif kind == "requirement":
             project.requirements = [r for r in project.requirements if r.id != identifier]
         if removed_instances or removed_faces:
+            valid_definitions = {d.id for d in project.definitions}
+            project.sketch_dimensions = [d for d in project.sketch_dimensions
+                                         if d.definition_id in valid_definitions]
             def touches(ref):
                 return ref is not None and (ref.instance_id in removed_instances or
                                             (ref.instance_id, ref.face_id) in removed_faces)

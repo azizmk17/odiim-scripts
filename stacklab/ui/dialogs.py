@@ -276,6 +276,27 @@ class DimensionDialog(FormDialog):
         super().accept()
 
 
+class SketchDimensionDialog(FormDialog):
+    """Edit a 2D drawing dimension without claiming it affects axial tolerance."""
+
+    def __init__(self, name: str, value: float, unit: str, *, driving: bool = True,
+                 parent=None):
+        super().__init__("Sketch dimension", parent)
+        self.name = QLineEdit(name)
+        self.value = number(value, low=0)
+        self.driving = QCheckBox("Drive selected sketch geometry")
+        self.driving.setChecked(driving)
+        self.form.addRow("Name", self.name)
+        self.form.addRow(f"Distance ({unit})", self.value)
+        self.form.addRow(self.driving)
+        self.form.addRow(QLabel("2D sketch dimensions shape the drawing. Axial dimensions drive the 1D tolerance stack."))
+
+    def accept(self) -> None:
+        if not self.name.text().strip():
+            return self.reject_input("Give the sketch dimension a name.")
+        super().accept()
+
+
 class SourceDialog(FormDialog):
     def __init__(self, source, parent=None):
         super().__init__("Manufacturing variation source", parent)

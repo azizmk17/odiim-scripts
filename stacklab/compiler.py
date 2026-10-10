@@ -72,6 +72,7 @@ def validate_project(project: Project) -> list[Diagnostic]:
     if project.unit not in {"mm", "in"}:
         error("unit", f"Unsupported unit '{project.unit}'", project.id)
     entities = [project, *project.definitions, *project.instances, *project.dimensions,
+                *project.sketch_dimensions,
                 *project.sources, *project.constraints, *project.contacts, *project.requirements,
                 *project.policies, *project.correlations, *project.parameters, *project.joints, *project.assemblies,
                 *project.analysis_cases]
@@ -115,6 +116,27 @@ def validate_project(project: Project) -> list[Diagnostic]:
                     error("outline_coordinate", f"Outline '{outline.name}' has a nonfinite vertex", outline.id)
                 if vertex.face_id is not None and vertex.face_id not in face_ids:
                     error("outline_face", f"Outline '{outline.name}' binds to a missing face", outline.id)
+    for dimension in project.sketch_dimensions:
+        definition = definitions.get(dimension.definition_id)
+        if definition is None:
+            error("sketch_dimension", f"Sketch dimension '{dimension.name}' has no part", dimension.id)
+            continue
+        if dimension.kind not in {"line_length", "point_distance", "line_spacing"}:
+            error("sketch_dimension", f"Sketch dimension '{dimension.name}' has an invalid kind", dimension.id)
+            continue
+        if not _finite(dimension.nominal) or dimension.nominal < 0:
+            error("sketch_dimension", f"Sketch dimension '{dimension.name}' needs a nonnegative finite value", dimension.id)
+        outlines = {outline.id: outline for outline in definition.outlines}
+        selections = [(dimension.first_outline_id, dimension.first_index,
+                       dimension.kind != "point_distance")]
+        if dimension.kind != "line_length":
+            selections.append((dimension.second_outline_id, dimension.second_index,
+                               dimension.kind != "point_distance"))
+        for outline_id, index, is_segment in selections:
+            outline = outlines.get(outline_id)
+            if (outline is None or not isinstance(index, int) or index < 0 or
+                index >= len(outline.vertices) - (0 if outline.closed or not is_segment else 1)):
+                error("sketch_dimension", f"Sketch dimension '{dimension.name}' refers to a missing sketch feature", dimension.id)
     for instance in project.instances:
         if instance.definition_id not in definitions:
             error("missing_definition", f"Instance '{instance.name}' has no valid definition", instance.id)
