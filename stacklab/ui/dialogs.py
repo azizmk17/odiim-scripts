@@ -134,6 +134,8 @@ class OutlineDialog(FormDialog):
         self.name = QLineEdit(outline.name)
         self.closed = QCheckBox("Closed, filled region")
         self.closed.setChecked(outline.closed)
+        self.construction = QCheckBox("Construction geometry (dashed)")
+        self.construction.setChecked(outline.construction)
         self.color = QLineEdit(outline.color)
         self.vertices = QPlainTextEdit()
         self.vertices.setMinimumHeight(190)
@@ -146,6 +148,7 @@ class OutlineDialog(FormDialog):
         hint.setWordWrap(True)
         self.form.addRow("Name", self.name)
         self.form.addRow("Region", self.closed)
+        self.form.addRow("Construction", self.construction)
         self.form.addRow("Color", self.color)
         self.form.addRow("Vertices", self.vertices)
         self.form.addRow(hint)
@@ -175,6 +178,34 @@ class OutlineDialog(FormDialog):
             return self.reject_input(str(exc))
         if len(vertices) < (3 if self.closed.isChecked() else 2):
             return self.reject_input("This outline needs more vertices.")
+        super().accept()
+
+
+class CircleDialog(FormDialog):
+    def __init__(self, circle, parent=None):
+        super().__init__("Edit sketch circle", parent)
+        self.name = QLineEdit(circle.name)
+        self.x = number(circle.x)
+        self.y = number(circle.y)
+        self.radius = number(circle.radius, low=0.0001)
+        self.color = QLineEdit(circle.color)
+        self.construction = QCheckBox("Construction geometry (dashed)")
+        self.construction.setChecked(circle.construction)
+        if circle.center_face_id:
+            self.x.setEnabled(False)
+            self.x.setToolTip("Center X is controlled by its axial feature point")
+        self.form.addRow("Name", self.name)
+        self.form.addRow("Center X", self.x)
+        self.form.addRow("Center Y", self.y)
+        self.form.addRow("Radius", self.radius)
+        self.form.addRow("Color", self.color)
+        self.form.addRow(self.construction)
+
+    def accept(self) -> None:
+        if not self.name.text().strip():
+            return self.reject_input("Give the circle a name.")
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", self.color.text().strip()):
+            return self.reject_input("Use a six-digit hex color such as #547aaf.")
         super().accept()
 
 
@@ -283,17 +314,50 @@ class SketchDimensionDialog(FormDialog):
                  parent=None):
         super().__init__("Sketch dimension", parent)
         self.name = QLineEdit(name)
-        self.value = number(value, low=0)
+        self.value = number(value, low=0, high=180 if unit == "degrees" else 1e9)
         self.driving = QCheckBox("Drive selected sketch geometry")
         self.driving.setChecked(driving)
         self.form.addRow("Name", self.name)
-        self.form.addRow(f"Distance ({unit})", self.value)
+        self.form.addRow(f"{'Angle' if unit == 'degrees' else 'Distance'} ({unit})", self.value)
         self.form.addRow(self.driving)
         self.form.addRow(QLabel("2D sketch dimensions shape the drawing. Axial dimensions drive the 1D tolerance stack."))
 
     def accept(self) -> None:
         if not self.name.text().strip():
             return self.reject_input("Give the sketch dimension a name.")
+        super().accept()
+
+
+class SketchConstraintDialog(FormDialog):
+    def __init__(self, constraint, parent=None):
+        super().__init__("Sketch constraint", parent)
+        self.name = QLineEdit(constraint.name)
+        self.form.addRow("Name", self.name)
+        self.form.addRow("Relation", QLabel(constraint.kind.title()))
+        self.x = self.y = None
+        if constraint.kind == "fixed":
+            self.x = number(constraint.x)
+            self.y = number(constraint.y)
+            self.form.addRow("Fixed X", self.x)
+            self.form.addRow("Fixed Y", self.y)
+
+    def accept(self) -> None:
+        if not self.name.text().strip():
+            return self.reject_input("Give the constraint a name.")
+        super().accept()
+
+
+class ParameterDialog(FormDialog):
+    def __init__(self, name: str, value: float, parent=None):
+        super().__init__("Sketch parameter", parent)
+        self.name = QLineEdit(name)
+        self.value = number(value)
+        self.form.addRow("Name", self.name)
+        self.form.addRow("Value", self.value)
+
+    def accept(self) -> None:
+        if not self.name.text().strip():
+            return self.reject_input("Give the parameter a name.")
         super().accept()
 
 

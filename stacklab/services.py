@@ -125,6 +125,8 @@ class ProjectService:
             errors = [issue for issue in candidate.validate() if issue.severity == "error"]
             if errors:
                 raise ValueError("; ".join(issue.message for issue in errors))
+            from .sketch_constraints import solve_project_sketches
+            solve_project_sketches(candidate)
             self._undo.append((deepcopy(self.project), deepcopy(self.presentation), description))
             self._undo = self._undo[-100:]
             self._redo.clear()

@@ -352,6 +352,7 @@ def export_pdf(path: str | Path, project: Project,
             layout = dict(presentation or project.view)
             rows = layout.get("part_y", {})
             polygons = []
+            circles = []
             datum_xs = []
             coordinates = []
             for row, instance in enumerate(i for i in project.instances if i.visible):
@@ -372,10 +373,17 @@ def export_pdf(path: str | Path, project: Project,
                         vertices.append((x, baseline + vertex.y))
                         coordinates.append((x, baseline + vertex.y))
                     polygons.append((outline, vertices))
+                for circle in definition.circles:
+                    cx = (nominal_positions.get((instance.id, circle.center_face_id),
+                           translation + circle.x) if circle.center_face_id else translation + circle.x)
+                    cy = baseline + circle.y
+                    circles.append((circle, cx, cy))
+                    coordinates.extend(((cx - circle.radius, cy - circle.radius),
+                                        (cx + circle.radius, cy + circle.radius)))
             if not coordinates:
                 self.canv.setFont("Helvetica", 8)
                 self.canv.drawString(5, self.height - 15,
-                    ("Nominal sketch unavailable: " + sketch_error) if sketch_error else "No outlined geometry")
+                    ("Nominal sketch unavailable: " + sketch_error) if sketch_error else "No sketch geometry")
                 return
             xmin = min(x for x, _ in coordinates)
             xmax = max([x for x, _ in coordinates] + datum_xs)
@@ -405,7 +413,15 @@ def export_pdf(path: str | Path, project: Project,
                 self.canv.setStrokeColor(stroke)
                 self.canv.setFillColor(fill)
                 self.canv.setLineWidth(1.1)
-                self.canv.drawPath(path, stroke=1, fill=int(outline.closed))
+                self.canv.setDash(4, 3) if outline.construction else self.canv.setDash()
+                self.canv.drawPath(path, stroke=1, fill=int(outline.closed and not outline.construction))
+                self.canv.setDash()
+            for circle, cx, cy in circles:
+                self.canv.setStrokeColor(colors.HexColor(circle.color))
+                self.canv.setLineWidth(1.1)
+                self.canv.setDash(4, 3) if circle.construction else self.canv.setDash()
+                self.canv.circle(px(cx), py(cy), circle.radius * scale, stroke=1, fill=0)
+                self.canv.setDash()
             self.canv.setStrokeColor(colors.HexColor("#344759"))
             self.canv.setDash(3, 2)
             for x in datum_xs:
@@ -413,7 +429,7 @@ def export_pdf(path: str | Path, project: Project,
             self.canv.setDash()
             self.canv.setFont("Helvetica", 7)
             self.canv.setFillColor(colors.HexColor("#344759"))
-            self.canv.drawRightString(self.width, 4, f"Nominal outlined assembly ({project.unit})")
+            self.canv.drawRightString(self.width, 4, f"Nominal assembly sketch ({project.unit})")
 
     document = SimpleDocTemplate(str(path), pagesize=A4, rightMargin=18 * mm,
                                  leftMargin=18 * mm, topMargin=17 * mm, bottomMargin=17 * mm)

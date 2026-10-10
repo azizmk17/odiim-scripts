@@ -72,12 +72,13 @@ def validate_project(project: Project) -> list[Diagnostic]:
     if project.unit not in {"mm", "in"}:
         error("unit", f"Unsupported unit '{project.unit}'", project.id)
     entities = [project, *project.definitions, *project.instances, *project.dimensions,
-                *project.sketch_dimensions,
+                *project.sketch_dimensions, *project.sketch_constraints,
                 *project.sources, *project.constraints, *project.contacts, *project.requirements,
                 *project.policies, *project.correlations, *project.parameters, *project.joints, *project.assemblies,
                 *project.analysis_cases]
     entities.extend(face for part in project.definitions for face in part.faces)
     entities.extend(outline for part in project.definitions for outline in part.outlines)
+    entities.extend(circle for part in project.definitions for circle in part.circles)
     seen: set[str] = set()
     for entity in entities:
         if not isinstance(entity.id, str) or not entity.id:
@@ -116,16 +117,29 @@ def validate_project(project: Project) -> list[Diagnostic]:
                     error("outline_coordinate", f"Outline '{outline.name}' has a nonfinite vertex", outline.id)
                 if vertex.face_id is not None and vertex.face_id not in face_ids:
                     error("outline_face", f"Outline '{outline.name}' binds to a missing face", outline.id)
+        for circle in definition.circles:
+            if not all(_finite(value) for value in (circle.x, circle.y, circle.radius)) or circle.radius <= 0:
+                error("circle", f"Circle '{circle.name}' needs a finite center and positive radius", circle.id)
+            if not re.fullmatch(r"#[0-9a-fA-F]{6}", circle.color):
+                error("circle_color", f"Circle '{circle.name}' needs a six-digit hex color", circle.id)
+            if circle.center_face_id is not None and circle.center_face_id not in face_ids:
+                error("circle_face", f"Circle '{circle.name}' binds to a missing face", circle.id)
     for dimension in project.sketch_dimensions:
         definition = definitions.get(dimension.definition_id)
         if definition is None:
             error("sketch_dimension", f"Sketch dimension '{dimension.name}' has no part", dimension.id)
             continue
-        if dimension.kind not in {"line_length", "point_distance", "line_spacing"}:
+        if dimension.kind not in {"line_length", "point_distance", "line_spacing", "circle_diameter", "angle_between_lines"}:
             error("sketch_dimension", f"Sketch dimension '{dimension.name}' has an invalid kind", dimension.id)
             continue
         if not _finite(dimension.nominal) or dimension.nominal < 0:
             error("sketch_dimension", f"Sketch dimension '{dimension.name}' needs a nonnegative finite value", dimension.id)
+        if dimension.kind == "angle_between_lines" and dimension.nominal > 180:
+            error("sketch_dimension", f"Sketch angle '{dimension.name}' must be at most 180 degrees", dimension.id)
+        if dimension.kind == "circle_diameter":
+            if dimension.first_outline_id not in {circle.id for circle in definition.circles}:
+                error("sketch_dimension", f"Sketch dimension '{dimension.name}' refers to a missing circle", dimension.id)
+            continue
         outlines = {outline.id: outline for outline in definition.outlines}
         selections = [(dimension.first_outline_id, dimension.first_index,
                        dimension.kind != "point_distance")]
@@ -137,6 +151,28 @@ def validate_project(project: Project) -> list[Diagnostic]:
             if (outline is None or not isinstance(index, int) or index < 0 or
                 index >= len(outline.vertices) - (0 if outline.closed or not is_segment else 1)):
                 error("sketch_dimension", f"Sketch dimension '{dimension.name}' refers to a missing sketch feature", dimension.id)
+    for constraint in project.sketch_constraints:
+        definition = definitions.get(constraint.definition_id)
+        if definition is None:
+            error("sketch_constraint", f"Sketch constraint '{constraint.name}' has no part", constraint.id)
+            continue
+        if constraint.kind not in {"fixed", "horizontal", "vertical", "coincident", "parallel", "perpendicular"}:
+            error("sketch_constraint", f"Sketch constraint '{constraint.name}' has an invalid kind", constraint.id)
+            continue
+        outlines = {outline.id: outline for outline in definition.outlines}
+        first_segment = constraint.kind in {"horizontal", "vertical", "parallel", "perpendicular"}
+        selections = [(constraint.first_outline_id, constraint.first_index, first_segment)]
+        if constraint.kind in {"coincident", "parallel", "perpendicular"}:
+            selections.append((constraint.second_outline_id, constraint.second_index,
+                               constraint.kind != "coincident"))
+        for outline_id, index, is_segment in selections:
+            outline = outlines.get(outline_id)
+            if (outline is None or not isinstance(index, int) or index < 0 or
+                index >= len(outline.vertices) - (0 if outline.closed or not is_segment else 1)):
+                error("sketch_constraint", f"Sketch constraint '{constraint.name}' refers to a missing sketch feature",
+                      constraint.id)
+        if constraint.kind == "fixed" and (not _finite(constraint.x) or not _finite(constraint.y)):
+            error("sketch_constraint", f"Fixed point '{constraint.name}' needs finite coordinates", constraint.id)
     for instance in project.instances:
         if instance.definition_id not in definitions:
             error("missing_definition", f"Instance '{instance.name}' has no valid definition", instance.id)

@@ -45,6 +45,19 @@ class Outline:
     vertices: list[SketchVertex] = field(default_factory=list)
     closed: bool = True
     color: str = "#4f86b2"
+    construction: bool = False
+
+
+@dataclass
+class SketchCircle:
+    id: str
+    name: str
+    x: float
+    y: float
+    radius: float
+    color: str = "#547aaf"
+    construction: bool = False
+    center_face_id: str | None = None
 
 
 @dataclass
@@ -53,6 +66,7 @@ class PartDefinition:
     name: str
     faces: list[Face] = field(default_factory=list)
     outlines: list[Outline] = field(default_factory=list)
+    circles: list[SketchCircle] = field(default_factory=list)
 
 
 @dataclass
@@ -99,6 +113,22 @@ class SketchDimension:
     second_index: int | None = None
     nominal: float = 0.0
     driving: bool = True
+
+
+@dataclass
+class SketchConstraint:
+    """A geometric relation between sketch vertices or line segments."""
+
+    id: str
+    name: str
+    definition_id: str
+    kind: str  # fixed, horizontal, vertical, coincident, parallel, perpendicular
+    first_outline_id: str
+    first_index: int
+    second_outline_id: str | None = None
+    second_index: int | None = None
+    x: float | None = None  # fixed-vertex coordinates
+    y: float | None = None
 
 
 @dataclass
@@ -299,6 +329,7 @@ class Project:
     instances: list[PartInstance] = field(default_factory=list)
     dimensions: list[Dimension] = field(default_factory=list)
     sketch_dimensions: list[SketchDimension] = field(default_factory=list)
+    sketch_constraints: list[SketchConstraint] = field(default_factory=list)
     sources: list[VariationSource] = field(default_factory=list)
     constraints: list[AssemblyConstraint] = field(default_factory=list)
     contacts: list[ContactPair] = field(default_factory=list)
@@ -328,10 +359,12 @@ class Project:
         try:
             definitions = [PartDefinition(**{**d, "faces": [Face(**f) for f in d.get("faces", [])],
                 "outlines": [Outline(**{**o, "vertices": [SketchVertex(**v) for v in o.get("vertices", [])]})
-                             for o in d.get("outlines", [])]}) for d in value.get("definitions", [])]
+                             for o in d.get("outlines", [])],
+                "circles": [SketchCircle(**c) for c in d.get("circles", [])]}) for d in value.get("definitions", [])]
             dimensions = [Dimension(**{**d, "first": ref(d["first"]), "second": ref(d["second"]),
                                        "tolerance": Tolerance(**d.get("tolerance", {}))}) for d in value.get("dimensions", [])]
             sketch_dimensions = [SketchDimension(**d) for d in value.get("sketch_dimensions", [])]
+            sketch_constraints = [SketchConstraint(**c) for c in value.get("sketch_constraints", [])]
             constraints = [AssemblyConstraint(**{**c, "first": ref(c.get("first")), "second": ref(c.get("second"))}) for c in value.get("constraints", [])]
             contacts = [ContactPair(**{**c, "first": ref(c["first"]), "second": ref(c["second"])}) for c in value.get("contacts", [])]
             requirements = [FunctionalRequirement(**{**r, "first": ref(r["first"]), "second": ref(r["second"])}) for r in value.get("requirements", [])]
@@ -341,6 +374,7 @@ class Project:
                 id=value["id"], name=value["name"], unit=value.get("unit", "mm"), definitions=definitions,
                 instances=[PartInstance(**i) for i in value.get("instances", [])], dimensions=dimensions,
                 sketch_dimensions=sketch_dimensions,
+                sketch_constraints=sketch_constraints,
                 sources=[VariationSource(**s) for s in value.get("sources", [])], constraints=constraints,
                 contacts=contacts, requirements=requirements, policies=policies,
                 correlations=[Correlation(**c) for c in value.get("correlations", [])],

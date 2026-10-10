@@ -69,7 +69,8 @@ def _validate_payload(payload: Any) -> dict[str, Any]:
     for key in ("id", "name"):
         if not isinstance(payload.get(key), str) or not payload[key].strip():
             raise ProjectFormatError(f"Engineering data requires a non-empty {key}")
-    for key in ("definitions", "instances", "dimensions", "sketch_dimensions", "sources", "constraints",
+    for key in ("definitions", "instances", "dimensions", "sketch_dimensions", "sketch_constraints",
+                "sources", "constraints",
                 "contacts", "requirements", "policies", "correlations"):
         if key in payload and not isinstance(payload[key], list):
             raise ProjectFormatError(f"Engineering field {key} must be a list")

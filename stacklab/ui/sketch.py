@@ -23,11 +23,12 @@ class SketchView(QGraphicsView):
     part_dragged = Signal(str, float)
     edit_requested = Signal(str, str)
     context_requested = Signal(str, str, object)
-    outline_finished = Signal(object, object, bool)  # instance ID, scene vertices, closed
+    outline_finished = Signal(object, object, bool, bool)  # instance ID, vertices, closed, construction
     outline_cancelled = Signal()
     point_clicked = Signal(object)
     geometry_clicked = Signal(object)
     tool_cancelled = Signal()
+    circle_finished = Signal(object, object, float, bool)  # instance, center, scene radius, construction
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,10 +57,16 @@ class SketchView(QGraphicsView):
         self._drawing_active = False
         self._drawing_instance: str | None = None
         self._drawing_closed = True
+        self._drawing_construction = False
         self._draft_points: list[QPointF] = []
         self._draft_hover: QPointF | None = None
         self._draft_item = None
         self._picking_point = False
+        self._drawing_circle = False
+        self._circle_instance: str | None = None
+        self._circle_center: QPointF | None = None
+        self._circle_hover: QPointF | None = None
+        self._circle_construction = False
         self._dimension_mode = False
         self._geometry_highlights: list[GeometryPick] = []
 
@@ -167,7 +174,7 @@ class SketchView(QGraphicsView):
                 body.setData(0, "instance")
                 body.setData(1, instance.id)
                 body.setZValue(1)
-            elif definition.outlines:
+            elif definition.outlines or definition.circles:
                 for outline in definition.outlines:
                     outline_key = f"{instance.id}:{definition.id}:{outline.id}"
                     outline_selected = self._selected in {("outline", outline_key),
@@ -187,8 +194,11 @@ class SketchView(QGraphicsView):
                     color = QColor(outline.color)
                     fill = QColor(color)
                     fill.setAlpha(100 if selected or outline_selected else 65)
-                    body = scene.addPath(shape, QPen(color, 3 if selected or outline_selected else 2),
-                                         QBrush(fill) if outline.closed else QBrush(Qt.NoBrush))
+                    pen = QPen(color, 3 if selected or outline_selected else 2,
+                               Qt.DashLine if outline.construction else Qt.SolidLine)
+                    body = scene.addPath(shape, pen,
+                                         QBrush(fill) if outline.closed and not outline.construction
+                                         else QBrush(Qt.NoBrush))
                     body.setData(0, "outline")
                     body.setData(1, outline_key)
                     body.setZValue(1)
@@ -235,6 +245,31 @@ class SketchView(QGraphicsView):
                 body.setData(0, "instance")
                 body.setData(1, instance.id)
                 body.setZValue(1)
+            for circle in definition.circles:
+                face = next((f for f in definition.faces if f.id == circle.center_face_id), None)
+                cx = self._x(instance, face) if face is not None else (
+                    self._translation(instance, definition) + circle.x) * SCALE
+                cy = y + circle.y * SCALE
+                radius = circle.radius * SCALE
+                all_x.extend((cx - radius, cx + radius))
+                all_y.extend((cy - radius, cy + radius))
+                circle_key = f"{instance.id}:{definition.id}:{circle.id}"
+                chosen = self._selected in {("circle", circle_key),
+                                            ("circle", f"{definition.id}:{circle.id}")}
+                pen = QPen(QColor(circle.color), 3 if chosen else 2,
+                           Qt.DashLine if circle.construction else Qt.SolidLine)
+                ring = scene.addEllipse(cx - radius, cy - radius, 2 * radius, 2 * radius,
+                                        pen, QBrush(Qt.NoBrush))
+                ring.setData(0, "sketch_circle" if self._dimension_mode else "circle")
+                ring.setData(1, circle_key)
+                ring.setToolTip(f"{circle.name}: diameter {2 * circle.radius:g} {project.unit}")
+                ring.setZValue(3)
+                center = scene.addEllipse(cx - 4, cy - 4, 8, 8,
+                                          QPen(QColor(circle.color), 1.5), QBrush(QColor("#ffffff")))
+                center.setData(0, "sketch_circle" if self._dimension_mode else "circle")
+                center.setData(1, circle_key)
+                center.setToolTip(ring.toolTip())
+                center.setZValue(6)
             label = scene.addText(instance.name)
             label.setDefaultTextColor(QColor("#234465"))
             label.setFont(QFont("Segoe UI", 11, QFont.DemiBold))
@@ -295,37 +330,85 @@ class SketchView(QGraphicsView):
                 if row_y is None:
                     continue
                 outlines = {outline.id: outline for outline in definition.outlines}
+                if sketch_dimension.kind == "circle_diameter":
+                    circle = next((item for item in definition.circles
+                                   if item.id == sketch_dimension.first_outline_id), None)
+                    if circle is None:
+                        continue
+                    face = next((f for f in definition.faces if f.id == circle.center_face_id), None)
+                    cx = self._x(instance, face) if face is not None else (
+                        self._translation(instance, definition) + circle.x) * SCALE
+                    cy = row_y + circle.y * SCALE
+                    a = QPointF(cx - circle.radius * SCALE, cy)
+                    b = QPointF(cx + circle.radius * SCALE, cy)
+                else:
+                    a = b = None
                 def point(outline_id: str, index: int) -> QPointF:
                     vertex = outlines[outline_id].vertices[index]
                     return QPointF(self._vertex_x(instance, definition, vertex), row_y + vertex.y * SCALE)
-                first_outline = outlines[sketch_dimension.first_outline_id]
-                a = point(first_outline.id, sketch_dimension.first_index)
-                if sketch_dimension.kind == "line_length":
-                    b = point(first_outline.id, (sketch_dimension.first_index + 1) % len(first_outline.vertices))
-                elif sketch_dimension.kind == "point_distance":
-                    b = point(sketch_dimension.second_outline_id, sketch_dimension.second_index)
-                else:
-                    second_outline = outlines[sketch_dimension.second_outline_id]
-                    i = sketch_dimension.first_index
-                    j = sketch_dimension.second_index
-                    a2 = point(first_outline.id, (i + 1) % len(first_outline.vertices))
-                    b = point(second_outline.id, j)
-                    b2 = point(second_outline.id, (j + 1) % len(second_outline.vertices))
-                    a = (a + a2) / 2
-                    b = (b + b2) / 2
+                if sketch_dimension.kind != "circle_diameter":
+                    first_outline = outlines[sketch_dimension.first_outline_id]
+                    a = point(first_outline.id, sketch_dimension.first_index)
+                    if sketch_dimension.kind == "line_length":
+                        b = point(first_outline.id, (sketch_dimension.first_index + 1) % len(first_outline.vertices))
+                    elif sketch_dimension.kind == "point_distance":
+                        b = point(sketch_dimension.second_outline_id, sketch_dimension.second_index)
+                    else:
+                        second_outline = outlines[sketch_dimension.second_outline_id]
+                        i = sketch_dimension.first_index
+                        j = sketch_dimension.second_index
+                        a2 = point(first_outline.id, (i + 1) % len(first_outline.vertices))
+                        b = point(second_outline.id, j)
+                        b2 = point(second_outline.id, (j + 1) % len(second_outline.vertices))
+                        a = (a + a2) / 2
+                        b = (b + b2) / 2
                 mid = (a + b) / 2
-                label = scene.addText(f"{sketch_dimension.name}: {measured:.3f} {project.unit}")
-                label.setDefaultTextColor(QColor("#5e53a6"))
+                label_value = (f"{measured:.2f}°" if sketch_dimension.kind == "angle_between_lines"
+                               else f"{measured:.3f} {project.unit}")
+                label = scene.addText(label_value)
+                label.setDefaultTextColor(QColor("#b74faf"))
                 label.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
                 label.setFlag(QGraphicsItem.ItemIgnoresTransformations)
                 label.setPos(mid.x() + 8, mid.y() - 27)
                 label.setData(0, "sketch_dimension")
                 label.setData(1, sketch_dimension.id)
-                line = scene.addLine(QLineF(a, b), QPen(QColor("#7268ae"), 1.5, Qt.DashLine))
+                label.setToolTip(f"{sketch_dimension.name}: {label_value}")
+                line = scene.addLine(QLineF(a, b), QPen(QColor("#b74faf"), 1.5, Qt.DashLine))
                 line.setData(0, "sketch_dimension")
                 line.setData(1, sketch_dimension.id)
                 line.setZValue(2)
                 all_y.append(mid.y() - 30)
+
+        constraint_symbols = {"fixed": "F", "horizontal": "H", "vertical": "V",
+                              "coincident": "●", "parallel": "∥", "perpendicular": "⊥"}
+        for constraint in project.sketch_constraints:
+            definition = defs.get(constraint.definition_id)
+            if definition is None:
+                continue
+            outline = next((item for item in definition.outlines
+                            if item.id == constraint.first_outline_id), None)
+            if outline is None or constraint.first_index >= len(outline.vertices):
+                continue
+            for instance in visible:
+                if instance.definition_id != definition.id or instance.id not in self._part_rows:
+                    continue
+                row_y = self._part_rows[instance.id]
+                vertex = outline.vertices[constraint.first_index]
+                anchor = QPointF(self._vertex_x(instance, definition, vertex), row_y + vertex.y * SCALE)
+                if constraint.kind in {"horizontal", "vertical", "parallel", "perpendicular"}:
+                    end = outline.vertices[(constraint.first_index + 1) % len(outline.vertices)]
+                    other = QPointF(self._vertex_x(instance, definition, end), row_y + end.y * SCALE)
+                    anchor = (anchor + other) / 2
+                marker = scene.addText(constraint_symbols.get(constraint.kind, "?"))
+                marker.setDefaultTextColor(QColor("#17825c" if self._selected !=
+                                                 ("sketch_constraint", constraint.id) else "#d87528"))
+                marker.setFont(QFont("Segoe UI", 10, QFont.Bold))
+                marker.setFlag(QGraphicsItem.ItemIgnoresTransformations)
+                marker.setPos(anchor.x() + 7, anchor.y() - 19)
+                marker.setData(0, "sketch_constraint")
+                marker.setData(1, constraint.id)
+                marker.setToolTip(f"{constraint.name}: {constraint.kind}")
+                marker.setZValue(8)
 
         dim_row = 0
         for dimension in project.dimensions:
@@ -339,13 +422,19 @@ class SketchView(QGraphicsView):
             y = min(a.y(), b.y()) - 75 - (dim_row % 3) * 27
             all_y.append(y - 30)
             dim_row += 1
-            color = QColor("#ce6b23" if dimension.id in self._chain_dimensions else "#677b8e")
+            color = QColor("#ce6b23" if dimension.id in self._chain_dimensions else "#b74faf")
             pen = QPen(color, 2 if dimension.id in self._chain_dimensions else 1)
             scene.addLine(a.x(), a.y() - 40, a.x(), y, pen)
             scene.addLine(b.x(), b.y() - 40, b.x(), y, pen)
             line = scene.addLine(a.x(), y, b.x(), y, pen)
             line.setData(0, "dimension")
             line.setData(1, dimension.id)
+            low, high = sorted((a.x(), b.x()))
+            if high - low > 18:
+                for x, direction in ((low, 1), (high, -1)):
+                    scene.addPolygon(QPolygonF([QPointF(x, y), QPointF(x + direction * 8, y - 4),
+                                                 QPointF(x + direction * 8, y + 4)]),
+                                     pen, QBrush(color))
             text = scene.addText(self._dimension_text(dimension, project.unit))
             text.setDefaultTextColor(color)
             text.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
@@ -353,6 +442,7 @@ class SketchView(QGraphicsView):
             text.setPos((a.x() + b.x()) / 2 - text.boundingRect().width() / 2, y - 29)
             text.setData(0, "dimension")
             text.setData(1, dimension.id)
+            text.setToolTip(dimension.name)
 
         for contact in project.contacts:
             a = self._face_positions.get((contact.first.instance_id, contact.first.face_id))
@@ -399,13 +489,14 @@ class SketchView(QGraphicsView):
                                       QPointF(x + tip * 8, arrow_y + 4)])
                     scene.addPolygon(head, pen, QBrush(color))
             measured = requirement.direction * (b.x() - a.x()) / SCALE
-            text = scene.addText(f"{requirement.name}: {measured:.3f} {project.unit}")
+            text = scene.addText(f"{measured:.3f} {project.unit}")
             text.setDefaultTextColor(color)
             text.setFont(QFont("Segoe UI", 9, QFont.DemiBold))
             text.setFlag(QGraphicsItem.ItemIgnoresTransformations)
             text.setPos((max(a.x(), b.x()) + 12 if high - low < 32 else low + 5), arrow_y - 25)
             text.setData(0, "requirement")
             text.setData(1, requirement.id)
+            text.setToolTip(requirement.name)
 
         xmin = min(all_x) if all_x else 0
         xmax = max(all_x) if all_x else 500
@@ -419,21 +510,24 @@ class SketchView(QGraphicsView):
     def _dimension_text(dimension, unit: str) -> str:
         lo, hi = dimension.tolerance.lower, dimension.tolerance.upper
         if dimension.display_style == "limits":
-            return f"{dimension.name}: {dimension.nominal+lo:.3f} / {dimension.nominal+hi:.3f} {unit}"
+            return f"{dimension.nominal+lo:.3f} / {dimension.nominal+hi:.3f} {unit}"
         if dimension.display_style == "bilateral" and abs(lo + hi) < 1e-9:
-            return f"{dimension.name}: {dimension.nominal:.3f} ±{hi:.3f} {unit}"
-        return f"{dimension.name}: {dimension.nominal:.3f} {hi:+.3f}/{lo:+.3f} {unit}"
+            return f"{dimension.nominal:.3f} ±{hi:.3f} {unit}"
+        return f"{dimension.nominal:.3f} {hi:+.3f}/{lo:+.3f} {unit}"
 
     def fit_assembly(self) -> None:
         if self.scene().items():
             self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
             self._manually_navigated = False
 
-    def begin_outline(self, instance_id: str | None, *, closed: bool = True) -> None:
+    def begin_outline(self, instance_id: str | None, *, closed: bool = True,
+                      construction: bool = False) -> None:
+        self.cancel_circle()
         self._picking_point = False
         self._drawing_active = True
         self._drawing_instance = instance_id
         self._drawing_closed = closed
+        self._drawing_construction = construction
         self._draft_points.clear()
         self._draft_hover = None
         self.setCursor(Qt.CrossCursor)
@@ -461,12 +555,13 @@ class SketchView(QGraphicsView):
         instance_id = self._drawing_instance
         vertices = [QPointF(point) for point in self._draft_points]
         closed = self._drawing_closed
+        construction = self._drawing_construction
         self._drawing_active = False
         self._draft_points.clear()
         self._draft_hover = None
         self.unsetCursor()
         self._draw_draft()
-        self.outline_finished.emit(instance_id, vertices, closed)
+        self.outline_finished.emit(instance_id, vertices, closed, construction)
         return True
 
     def cancel_outline(self) -> None:
@@ -479,8 +574,30 @@ class SketchView(QGraphicsView):
         self._draw_draft()
         self.outline_cancelled.emit()
 
+    def begin_circle(self, instance_id: str, *, construction: bool = False) -> None:
+        self.cancel_outline()
+        self.cancel_pick_point()
+        self._drawing_circle = True
+        self._circle_instance = instance_id
+        self._circle_center = None
+        self._circle_hover = None
+        self._circle_construction = construction
+        self.setCursor(Qt.CrossCursor)
+        self.setFocus()
+
+    def cancel_circle(self) -> None:
+        if not self._drawing_circle:
+            return
+        self._drawing_circle = False
+        self._circle_center = None
+        self._circle_hover = None
+        self._circle_instance = None
+        self.unsetCursor()
+        self._draw_draft()
+
     def begin_pick_point(self) -> None:
         self.cancel_outline()
+        self.cancel_circle()
         self._picking_point = True
         self.setCursor(Qt.CrossCursor)
         self.setFocus()
@@ -494,6 +611,15 @@ class SketchView(QGraphicsView):
         if self._draft_item is not None and self._draft_item.scene() is scene:
             scene.removeItem(self._draft_item)
         self._draft_item = None
+        if self._drawing_circle and self._circle_center is not None:
+            path = QPainterPath()
+            hover = self._circle_hover or self._circle_center
+            radius = QLineF(self._circle_center, hover).length()
+            path.addEllipse(self._circle_center, max(radius, 2), max(radius, 2))
+            self._draft_item = scene.addPath(path, QPen(QColor("#388f8a"), 2, Qt.DashLine),
+                                             QBrush(Qt.NoBrush))
+            self._draft_item.setZValue(20)
+            return
         if not self._drawing_active or not self._draft_points:
             return
         path = QPainterPath(self._draft_points[0])
@@ -533,6 +659,28 @@ class SketchView(QGraphicsView):
             self.point_clicked.emit(point)
             event.accept()
             return
+        if self._drawing_circle:
+            if event.button() == Qt.LeftButton:
+                point = self.mapToScene(event.position().toPoint())
+                if self._grid_visible:
+                    point = QPointF(round(point.x() / SCALE) * SCALE,
+                                    round(point.y() / SCALE) * SCALE)
+                if self._circle_center is None:
+                    self._circle_center = point
+                    self._draw_draft()
+                else:
+                    radius = QLineF(self._circle_center, point).length()
+                    if radius >= SCALE * 0.1:
+                        instance_id, center, construction = (self._circle_instance,
+                                                              QPointF(self._circle_center),
+                                                              self._circle_construction)
+                        self.cancel_circle()
+                        self.circle_finished.emit(instance_id, center, radius, construction)
+            elif event.button() == Qt.RightButton:
+                self.cancel_circle()
+                self.outline_cancelled.emit()
+            event.accept()
+            return
         if self._drawing_active:
             if event.button() == Qt.LeftButton:
                 self.add_outline_point(self.mapToScene(event.pos()))
@@ -542,11 +690,14 @@ class SketchView(QGraphicsView):
             return
         if self._dimension_mode and event.button() == Qt.LeftButton:
             for item in self.items(event.position().toPoint()):
-                if item.data(0) in {"sketch_vertex", "sketch_segment"}:
-                    instance_id, definition_id, outline_id, index = str(item.data(1)).split(":")
-                    kind = "vertex" if item.data(0) == "sketch_vertex" else "segment"
+                if item.data(0) in {"sketch_vertex", "sketch_segment", "sketch_circle"}:
+                    parts = str(item.data(1)).split(":")
+                    instance_id, definition_id, outline_id = parts[:3]
+                    index = int(parts[3]) if len(parts) > 3 else 0
+                    kind = {"sketch_vertex": "vertex", "sketch_segment": "segment",
+                            "sketch_circle": "circle"}[item.data(0)]
                     self.geometry_clicked.emit(GeometryPick(kind, instance_id, definition_id,
-                                                            outline_id, int(index)))
+                                                            outline_id, index))
                     event.accept()
                     return
         if event.button() == Qt.LeftButton:
@@ -576,13 +727,18 @@ class SketchView(QGraphicsView):
             self._draw_draft()
             event.accept()
             return
+        if self._drawing_circle:
+            self._circle_hover = self.mapToScene(event.position().toPoint())
+            self._draw_draft()
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.MiddleButton:
             self._pan_start = None
             self.unsetCursor()
-            if self._drawing_active or self._picking_point:
+            if self._drawing_active or self._drawing_circle or self._picking_point:
                 self.setCursor(Qt.CrossCursor)
             event.accept()
             return
@@ -607,13 +763,16 @@ class SketchView(QGraphicsView):
                 self.finish_outline()
             event.accept()
             return
+        if self._drawing_circle:
+            event.accept()
+            return
         picked = self._entity_at(event.pos())
         if picked:
             self.edit_requested.emit(*picked)
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event) -> None:
-        if self._drawing_active:
+        if self._drawing_active or self._drawing_circle:
             event.accept()
             return
         picked = self._entity_at(event.pos())
@@ -629,6 +788,11 @@ class SketchView(QGraphicsView):
         event.accept()
 
     def keyPressEvent(self, event) -> None:
+        if self._drawing_circle and event.key() == Qt.Key_Escape:
+            self.cancel_circle()
+            self.outline_cancelled.emit()
+            event.accept()
+            return
         if self._dimension_mode and event.key() == Qt.Key_Escape:
             self.tool_cancelled.emit()
             event.accept()

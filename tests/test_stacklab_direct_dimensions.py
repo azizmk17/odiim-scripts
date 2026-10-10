@@ -160,3 +160,69 @@ def test_diagonal_length_can_change_while_endpoint_axial_x_stays_bound():
     assert definition.faces[0].local_x == 30
     assert definition.outlines[0].vertices[1].x == 30
     assert measure_sketch_dimension(definition, dimension) == pytest.approx(65)
+
+
+def test_sketch_constraint_tool_fixes_point_then_makes_line_horizontal(window, monkeypatch):
+    window.service.execute(lambda project: setattr(
+        project.definitions[0].outlines[0].vertices[1], "y", 5), "Skew top")
+    choices = iter([("Fix point", True), ("Horizontal line", True)])
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *args, **kwargs: next(choices))
+    window.add_sketch_constraint()
+    window.sketch.geometry_clicked.emit(pick("vertex", 0))
+    window.add_sketch_constraint()
+    window.sketch.geometry_clicked.emit(pick("segment", 0))
+    assert len(window.service.project.sketch_constraints) == 2
+    assert window.service.project.definitions[0].outlines[0].vertices[1].y == pytest.approx(0, abs=1e-6)
+    assert any(item.data(0) == "sketch_constraint" for item in window.sketch.scene().items())
+
+
+def test_circle_draw_and_direct_diameter_dimension(window, monkeypatch, tmp_path):
+    window.show()
+    QApplication.processEvents()
+    window._select_entity("instance", "instance")
+    window.sketch.fit_assembly()
+    row = window.sketch._part_rows["instance"]
+    window.draw_circle()
+    for point in (QPointF(20 * SCALE, row + 40), QPointF(30 * SCALE, row + 40)):
+        QTest.mouseClick(window.sketch.viewport(), Qt.LeftButton,
+                         pos=window.sketch.mapFromScene(point))
+    definition = window.service.project.definitions[0]
+    assert len(definition.circles) == 1
+    circle = definition.circles[0]
+    assert circle.radius == pytest.approx(10, abs=0.5)
+
+    def diameter_dialog(dialog):
+        dialog.value.setValue(24)
+        return QDialog.Accepted
+    monkeypatch.setattr(SketchDimensionDialog, "exec", diameter_dialog)
+    window._set_tool("dimension")
+    window.sketch.geometry_clicked.emit(GeometryPick("circle", "instance", "def", circle.id, 0))
+    assert window.service.project.definitions[0].circles[0].radius == pytest.approx(12)
+    assert window.service.project.sketch_dimensions[0].kind == "circle_diameter"
+    path = tmp_path / "circle.stack1d"
+    save_project(path, window.service.project)
+    restored = load_project_bundle(path).project
+    assert restored.definitions[0].circles[0].radius == pytest.approx(12)
+
+
+def test_two_nonparallel_lines_create_angle_dimension(window, monkeypatch):
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *args, **kwargs: ("Spacing to another line", True))
+    window._set_tool("dimension")
+    window.sketch.geometry_clicked.emit(pick("segment", 0))
+    window.sketch.geometry_clicked.emit(pick("segment", 1))
+    dimension = window.service.project.sketch_dimensions[0]
+    assert dimension.kind == "angle_between_lines"
+    assert dimension.nominal == pytest.approx(90)
+    window._edit_sketch_dimension(dimension)
+    assert measure_sketch_dimension(window.service.project.definitions[0], dimension) == pytest.approx(90)
+
+
+def test_angle_dimension_rotates_second_line():
+    definition = PartDefinition("angled", "Angles", [], [
+        Outline("first", "First", [SketchVertex(0, 0), SketchVertex(10, 0)], False),
+        Outline("second", "Second", [SketchVertex(10, 0), SketchVertex(10, 10)], False),
+    ])
+    dimension = SketchDimension("angle", "Angle", "angled", "angle_between_lines",
+                                "first", 0, "second", 0)
+    set_sketch_dimension_value(definition, dimension, 60)
+    assert measure_sketch_dimension(definition, dimension) == pytest.approx(60)

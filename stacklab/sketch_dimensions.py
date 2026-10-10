@@ -7,7 +7,7 @@ are converted to engineering ``Dimension`` entities by the UI instead.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import hypot, sqrt
+from math import acos, atan2, cos, degrees, hypot, radians, sin, sqrt
 
 from .domain import PartDefinition, SketchDimension
 
@@ -53,7 +53,20 @@ def parallel_line_spacing(first, second) -> float:
     return abs(ux * (cy - ay) - uy * (cx - ax)) / first_length
 
 
+def angle_between_lines(first, second) -> float:
+    (ax, ay), (bx, by) = first
+    (cx, cy), (dx, dy) = second
+    ux, uy, vx, vy = bx - ax, by - ay, dx - cx, dy - cy
+    length = hypot(ux, uy) * hypot(vx, vy)
+    if length < 1e-9:
+        raise ValueError("Select nonzero-length lines")
+    return degrees(acos(max(-1.0, min(1.0, (ux * vx + uy * vy) / length))))
+
+
 def measure_sketch_dimension(definition: PartDefinition, dimension: SketchDimension) -> float:
+    if dimension.kind == "circle_diameter":
+        circle = next(item for item in definition.circles if item.id == dimension.first_outline_id)
+        return 2 * circle.radius
     first = GeometryPick("segment" if dimension.kind != "point_distance" else "vertex",
                          "", definition.id, dimension.first_outline_id, dimension.first_index)
     if dimension.kind == "line_length":
@@ -68,6 +81,8 @@ def measure_sketch_dimension(definition: PartDefinition, dimension: SketchDimens
         return hypot(b[0] - a[0], b[1] - a[1])
     if dimension.kind == "line_spacing":
         return parallel_line_spacing(segment_points(definition, first), segment_points(definition, second))
+    if dimension.kind == "angle_between_lines":
+        return angle_between_lines(segment_points(definition, first), segment_points(definition, second))
     raise ValueError(f"Unknown sketch dimension kind: {dimension.kind}")
 
 
@@ -80,6 +95,15 @@ def set_sketch_dimension_value(definition: PartDefinition, dimension: SketchDime
     """
     if target < 0:
         raise ValueError("A sketch distance cannot be negative")
+    if dimension.kind == "angle_between_lines" and target > 180:
+        raise ValueError("A line angle must be between 0 and 180 degrees")
+    if dimension.kind == "circle_diameter":
+        if target <= 0:
+            raise ValueError("A circle diameter must be greater than zero")
+        circle = next(item for item in definition.circles if item.id == dimension.first_outline_id)
+        circle.radius = target / 2
+        dimension.nominal = target
+        return
     outlines = {outline.id: outline for outline in definition.outlines}
 
     def move(outline_id: str, index: int, dx: float, dy: float) -> None:
@@ -116,6 +140,20 @@ def set_sketch_dimension_value(definition: PartDefinition, dimension: SketchDime
         else:
             scale = target / length - 1
             move(second_outline_id, second_index, (b[0] - a[0]) * scale, (b[1] - a[1]) * scale)
+    elif dimension.kind == "angle_between_lines":
+        first = GeometryPick("segment", "", definition.id,
+                             dimension.first_outline_id, dimension.first_index)
+        second = GeometryPick("segment", "", definition.id,
+                              dimension.second_outline_id, dimension.second_index)
+        (ax, ay), (bx, by) = segment_points(definition, first)
+        (cx, cy), (dx, dy) = segment_points(definition, second)
+        base_angle = atan2(by - ay, bx - ax)
+        current_angle = atan2(dy - cy, dx - cx)
+        length = hypot(dx - cx, dy - cy)
+        sign = 1 if sin(current_angle - base_angle) >= 0 else -1
+        target_angle = base_angle + sign * radians(target)
+        move(second.outline_id, (second.index + 1) % len(outlines[second.outline_id].vertices),
+             cx + length * cos(target_angle) - dx, cy + length * sin(target_angle) - dy)
     elif dimension.kind == "line_spacing":
         first = GeometryPick("segment", "", definition.id,
                              dimension.first_outline_id, dimension.first_index)

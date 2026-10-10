@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 from typing import Callable
 
-from PySide6.QtCore import QObject, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QCloseEvent, QColor, QKeySequence, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -42,7 +42,8 @@ from PySide6.QtWidgets import (
 
 from stacklab.domain import (
     AnalysisCase, AssemblyConstraint, AssemblyPolicy, ContactPair, Correlation, Dimension, Face, FaceRef,
-    FunctionalRequirement, Outline, PartDefinition, PartInstance, SketchDimension, SketchVertex, Tolerance,
+    FunctionalRequirement, Outline, Parameter, PartDefinition, PartInstance, SketchConstraint, SketchDimension,
+    SketchCircle, SketchVertex, Tolerance,
     VariationSource, new_id,
 )
 from stacklab.services import ProjectService, StaleAnalysis
@@ -51,9 +52,9 @@ from stacklab.sketch_dimensions import (GeometryPick, measure_sketch_dimension,
                                         set_sketch_dimension_value, vertex_point)
 
 from .dialogs import (
-    AnalysisSettingsDialog, ConstraintDialog, ContactDialog, CorrelationDialog, DimensionDialog,
-    FaceDialog, InstanceDialog, OutlineDialog, PartDialog, PolicyDialog, RequirementDialog,
-    SketchDimensionDialog, SourceDialog,
+    AnalysisSettingsDialog, CircleDialog, ConstraintDialog, ContactDialog, CorrelationDialog, DimensionDialog,
+    FaceDialog, InstanceDialog, OutlineDialog, ParameterDialog, PartDialog, PolicyDialog, RequirementDialog,
+    SketchConstraintDialog, SketchDimensionDialog, SourceDialog,
 )
 from .sketch import SCALE, TRACK, SketchView
 
@@ -75,6 +76,7 @@ class MainWindow(QMainWindow):
         self._tool: str | None = None
         self._picked_faces: list[FaceRef] = []
         self._picked_geometry: list[GeometryPick | FaceRef] = []
+        self._sketch_constraint_kind: str | None = None
         self._busy = False
         self._future = None
         self._fit_on_show = True
@@ -91,6 +93,7 @@ class MainWindow(QMainWindow):
         self._create_actions()
         self._create_workspace()
         self._create_toolbar()
+        self._create_sketch_palette()
         self._create_status()
         self._refresh()
 
@@ -121,6 +124,11 @@ class MainWindow(QMainWindow):
                                                 tip="Draw another closed contour on a selected part")
         self.draw_path_action = self._action("Add Polyline", lambda: self.draw_outline(False),
                                              tip="Draw an open profile on a selected part")
+        self.circle_action = self._action("Circle", self.draw_circle,
+                                          tip="Click a circle center and a point on its radius")
+        self.construction_action = self._action("Construction Line",
+            lambda: self.draw_outline(False, construction=True),
+            tip="Draw a dashed construction path on a selected part")
         self.place_point_action = self._action("Place Point", self.place_point,
                                                tip="Click a feature to create a dimensionable point")
         self.face_action = self._action("Add Face", self.add_face, tip="Add an axial feature to a part")
@@ -129,6 +137,8 @@ class MainWindow(QMainWindow):
         self.dimension_action = self._action("Dimension", lambda: self._set_tool(
             None if self._tool == "dimension" else "dimension"),
             tip="Click one line for length, two vertices for distance, or two parallel lines for spacing", checkable=True)
+        self.sketch_constraint_action = self._action("Sketch Constraint", self.add_sketch_constraint,
+            tip="Constrain sketch points and lines: fixed, H, V, coincident, parallel or perpendicular", checkable=True)
         self.constraint_action = self._action("Constraint", self.add_constraint, tip="Define grounding, alignment or bounded movement")
         self.contact_action = self._action("Contact", lambda: self._set_tool("contact"), tip="Select two compatible faces as a candidate contact", checkable=True)
         self.policy_action = self._action("Position Policy", self.add_policy, tip="Define how floating parts are positioned")
@@ -152,8 +162,10 @@ class MainWindow(QMainWindow):
             edit_menu.addAction(action)
         sketch_menu = self.menuBar().addMenu("&Sketch")
         for action in (self.part_action, self.draw_part_action, self.draw_outline_action,
-                       self.draw_path_action, self.place_point_action, self.face_action,
-                       self.centerline_action, self.dimension_action, self.constraint_action,
+                       self.draw_path_action, self.circle_action, self.construction_action,
+                       self.place_point_action, self.face_action,
+                       self.centerline_action, self.dimension_action, self.sketch_constraint_action,
+                       self.constraint_action,
                        self.contact_action, self.policy_action, self.gap_action):
             sketch_menu.addAction(action)
         analysis_menu = self.menuBar().addMenu("&Analysis")
@@ -175,14 +187,50 @@ class MainWindow(QMainWindow):
         for action in (self.undo_action, self.redo_action):
             toolbar.addAction(action)
         toolbar.addSeparator()
-        for action in (self.part_action, self.draw_part_action, self.draw_outline_action,
-                       self.place_point_action, self.face_action, self.centerline_action, self.dimension_action,
-                       self.constraint_action, self.contact_action, self.policy_action, self.gap_action):
-            toolbar.addAction(action)
-        toolbar.addSeparator()
         toolbar.addAction(self.analyze_action)
         toolbar.addAction(self.correlation_action)
         toolbar.addAction(self.export_action)
+
+    def _create_sketch_palette(self) -> None:
+        palette = QToolBar("Sketch tools", self)
+        palette.setObjectName("sketchPalette")
+        palette.setMovable(False)
+        palette.setOrientation(Qt.Vertical)
+        palette.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        palette.setIconSize(QSize(24, 24))
+        palette.setFixedWidth(104)
+        self.addToolBar(Qt.LeftToolBarArea, palette)
+        palette.addWidget(QLabel("SKETCH"))
+        for text, callback, tip in (
+            ("Select", lambda: self._set_tool(None), "Select and edit sketch geometry"),
+            ("Part", self.draw_new_part, "Draw a new closed part profile"),
+            ("Outline", lambda: self.draw_outline(True), "Add a closed contour"),
+            ("Line", lambda: self.draw_outline(False), "Draw a connected line path"),
+            ("Circle", self.draw_circle, "Draw a circle by center and radius"),
+            ("Const.", lambda: self.draw_outline(False, construction=True),
+             "Draw dashed construction geometry"),
+            ("Point", self.place_point, "Place a dimensionable feature point"),
+            ("Datum", self.add_centerline, "Add an axial datum line"),
+        ):
+            palette.addAction(self._action(text, callback, tip=tip))
+        palette.addSeparator()
+        palette.addAction(self._action("Dim", lambda: self._set_tool("dimension"),
+                                       tip="Dimension a line, two vertices, or two parallel lines"))
+        for text, kind, tip in (
+            ("Fix", "fixed", "Fix a selected sketch vertex"),
+            ("H", "horizontal", "Constrain a line horizontal"),
+            ("V", "vertical", "Constrain a line vertical"),
+            ("Coin.", "coincident", "Make two vertices coincident"),
+            ("Par.", "parallel", "Make two lines parallel"),
+            ("Perp.", "perpendicular", "Make two lines perpendicular"),
+        ):
+            palette.addAction(self._action(text, lambda checked=False, k=kind:
+                                           self._start_sketch_constraint(k), tip=tip))
+        palette.addSeparator()
+        palette.addAction(self._action("Contact", lambda: self._set_tool("contact"),
+                                       tip="Select two faces as a contact pair"))
+        palette.addAction(self._action("Gap", lambda: self._set_tool("gap"),
+                                       tip="Measure a functional gap between two faces"))
 
     def _create_workspace(self) -> None:
         splitter = QSplitter(Qt.Horizontal, self)
@@ -212,6 +260,7 @@ class MainWindow(QMainWindow):
         self.sketch.edit_requested.connect(self._edit_entity)
         self.sketch.context_requested.connect(self._context_menu)
         self.sketch.outline_finished.connect(self._outline_finished)
+        self.sketch.circle_finished.connect(self._circle_finished)
         self.sketch.outline_cancelled.connect(self._sketch_cancelled)
         self.sketch.point_clicked.connect(self._point_clicked)
         self.sketch.geometry_clicked.connect(self._geometry_clicked)
@@ -227,16 +276,45 @@ class MainWindow(QMainWindow):
         self.property_content = QWidget()
         self.property_form = QFormLayout(self.property_content)
         self.property_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        right_layout.addWidget(self.property_content)
+        self.side_tabs = QTabWidget()
+        property_page = QWidget()
+        property_layout = QVBoxLayout(property_page)
+        property_layout.setContentsMargins(4, 4, 4, 4)
+        property_layout.addWidget(self.property_content)
         self.edit_button = QPushButton("Edit selected…")
         self.edit_button.clicked.connect(self.edit_selected)
-        right_layout.addWidget(self.edit_button)
+        property_layout.addWidget(self.edit_button)
         self.delete_button = QPushButton("Delete selected")
         self.delete_button.clicked.connect(self.delete_selected)
-        right_layout.addWidget(self.delete_button)
-        right_layout.addStretch(1)
+        property_layout.addWidget(self.delete_button)
+        property_layout.addStretch(1)
+        self.side_tabs.addTab(property_page, "Properties")
+        parameter_page = QWidget()
+        parameter_layout = QVBoxLayout(parameter_page)
+        parameter_layout.setContentsMargins(4, 4, 4, 4)
+        self.parameter_tree = QTreeWidget()
+        self.parameter_tree.setHeaderLabels(["Name", "Value"])
+        self.parameter_tree.setColumnCount(2)
+        self.parameter_tree.itemSelectionChanged.connect(self._parameter_selected)
+        self.parameter_tree.itemDoubleClicked.connect(lambda *_: self.edit_selected())
+        parameter_layout.addWidget(self.parameter_tree)
+        row = QHBoxLayout()
+        dimension_button = QPushButton("Dimension")
+        dimension_button.clicked.connect(lambda: self._set_tool("dimension"))
+        row.addWidget(dimension_button)
+        constraint_button = QPushButton("Constraint")
+        constraint_button.clicked.connect(self.add_sketch_constraint)
+        row.addWidget(constraint_button)
+        parameter_layout.addLayout(row)
+        add_parameter = QPushButton("+ Parameter")
+        add_parameter.clicked.connect(self.add_parameter)
+        parameter_layout.addWidget(add_parameter)
+        self.side_tabs.addTab(parameter_page, "Parameters")
+        right_layout.addWidget(self.side_tabs)
         splitter.addWidget(right)
-        splitter.setSizes([250, 900, 275])
+        right.setMinimumWidth(280)
+        right.setMaximumWidth(400)
+        splitter.setSizes([240, 850, 340])
 
         self.bottom = QDockWidget("Engineering analysis", self)
         self.bottom.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
@@ -304,6 +382,8 @@ class MainWindow(QMainWindow):
             QTreeWidget::item { padding: 3px; }
             QTreeWidget::item:selected { background: #d9eafb; color: #174571; }
             QToolBar { background: #fff; border-bottom: 1px solid #d9e1ea; spacing: 3px; padding: 4px; }
+            QToolBar#sketchPalette { border-right: 1px solid #d9e1ea; border-bottom: none; spacing: 2px; }
+            QToolBar#sketchPalette QToolButton { min-width: 68px; padding: 4px 5px; }
             QToolButton { padding: 6px 8px; border-radius: 4px; }
             QToolButton:hover, QPushButton:hover { background: #e8f2fb; }
             QToolButton:checked { background: #cfe7fb; }
@@ -335,6 +415,7 @@ class MainWindow(QMainWindow):
         self.undo_action.setEnabled(self.service.can_undo)
         self.redo_action.setEnabled(self.service.can_redo)
         self._build_tree()
+        self._build_parameter_panel()
         positions = None
         if hasattr(self.service, "nominal_geometry"):
             try:
@@ -343,6 +424,46 @@ class MainWindow(QMainWindow):
                 self.status_label.setText(str(exc))
         self.sketch.set_project(project, positions, self.service.presentation)
         self._show_properties()
+
+    def _build_parameter_panel(self) -> None:
+        table = self.parameter_tree
+        table.blockSignals(True)
+        table.clear()
+        project = self.service.project
+        definitions = {definition.id: definition for definition in project.definitions}
+        groups = [
+            ("Axial dimensions", "dimension", project.dimensions),
+            ("Sketch dimensions", "sketch_dimension", project.sketch_dimensions),
+            ("Geometric constraints", "sketch_constraint", project.sketch_constraints),
+            ("Parameters", "parameter", project.parameters),
+        ]
+        for heading, kind, entities in groups:
+            group = QTreeWidgetItem(table, [heading, ""])
+            for entity in entities:
+                if kind == "dimension":
+                    value = f"{entity.nominal:.3f} {project.unit}"
+                elif kind == "sketch_dimension":
+                    definition = definitions.get(entity.definition_id)
+                    try:
+                        unit = "°" if entity.kind == "angle_between_lines" else project.unit
+                        value = f"{measure_sketch_dimension(definition, entity):.3f} {unit}"
+                    except (ValueError, KeyError, IndexError, TypeError):
+                        value = "Invalid geometry"
+                elif kind == "sketch_constraint":
+                    value = entity.kind.title()
+                else:
+                    value = f"{entity.nominal:g}"
+                item = QTreeWidgetItem(group, [entity.name, value])
+                item.setData(0, Qt.UserRole, (kind, entity.id))
+            group.setExpanded(True)
+        table.resizeColumnToContents(0)
+        table.blockSignals(False)
+
+    def _parameter_selected(self) -> None:
+        item = self.parameter_tree.currentItem()
+        data = item.data(0, Qt.UserRole) if item is not None else None
+        if data:
+            self._select_entity(*data)
 
     def _build_tree(self) -> None:
         self.tree.blockSignals(True)
@@ -357,6 +478,9 @@ class MainWindow(QMainWindow):
             for outline in definition.outlines:
                 self._item(item, f"{outline.name}  ({len(outline.vertices)} vertices)",
                            "outline", f"{definition.id}:{outline.id}")
+            for circle in definition.circles:
+                self._item(item, f"{circle.name}  ⌀{2 * circle.radius:g} {project.unit}",
+                           "circle", f"{definition.id}:{circle.id}")
         instances = self._item(root, "Part instances", "group", "instances")
         for instance in project.instances:
             marker = "◌ " if not instance.visible else ""
@@ -368,6 +492,8 @@ class MainWindow(QMainWindow):
         for label, kind, sequence in (
             ("Dimensions", "dimension", project.dimensions),
             ("Sketch dimensions", "sketch_dimension", project.sketch_dimensions),
+            ("Sketch constraints", "sketch_constraint", project.sketch_constraints),
+            ("Parameters", "parameter", project.parameters),
             ("Manufacturing sources", "source", project.sources),
             ("Source correlations", "correlation", project.correlations),
             ("Constraints", "constraint", project.constraints),
@@ -388,7 +514,7 @@ class MainWindow(QMainWindow):
         if self._selected:
             kind, identifier = self._selected
             self._select_tree(kind, ":".join(identifier.split(":")[-2:])
-                              if kind == "outline" else identifier)
+                              if kind in {"outline", "circle"} else identifier)
         self.tree.blockSignals(False)
 
     @staticmethod
@@ -433,7 +559,7 @@ class MainWindow(QMainWindow):
     def _select_entity(self, kind: str, identifier: str, *, update_tree=True) -> None:
         self._selected = (kind, identifier)
         if update_tree:
-            tree_identifier = ":".join(identifier.split(":")[-2:]) if kind == "outline" else identifier
+            tree_identifier = ":".join(identifier.split(":")[-2:]) if kind in {"outline", "circle"} else identifier
             self._select_tree(kind, tree_identifier)
         faces = {(face.instance_id, face.face_id) for face in self._picked_faces}
         self.sketch.set_highlights(self._selected, faces, self.sketch._chain_dimensions)
@@ -493,12 +619,17 @@ class MainWindow(QMainWindow):
             owner_id, outline_id = identifier.split(":")[-2:]
             definition = next((d for d in project.definitions if d.id == owner_id), None)
             return next((item for item in definition.outlines if item.id == outline_id), None) if definition else None
+        if kind == "circle":
+            owner_id, circle_id = identifier.split(":")[-2:]
+            definition = next((d for d in project.definitions if d.id == owner_id), None)
+            return next((item for item in definition.circles if item.id == circle_id), None) if definition else None
         mapping = {"definition": project.definitions, "instance": project.instances,
                    "dimension": project.dimensions, "sketch_dimension": project.sketch_dimensions,
+                   "sketch_constraint": project.sketch_constraints,
                    "constraint": project.constraints,
                    "contact": project.contacts, "policy": project.policies,
                    "requirement": project.requirements, "source": project.sources,
-                   "correlation": project.correlations}
+                   "correlation": project.correlations, "parameter": project.parameters}
         return next((entity for entity in mapping.get(kind, []) if entity.id == identifier), None)
 
     def _face_label(self, ref: FaceRef) -> str:
@@ -652,15 +783,42 @@ class MainWindow(QMainWindow):
         choice, ok = QInputDialog.getItem(self, title, "Part:", choices, 0, False)
         return instances[choices.index(choice)] if ok else None
 
-    def draw_outline(self, closed: bool = True) -> None:
+    def draw_outline(self, closed: bool = True, *, construction: bool = False) -> None:
         instance = self._choose_sketch_instance("Sketch outline")
         if instance is None:
             return
         self._set_tool(None)
-        self.sketch.begin_outline(instance.id, closed=closed)
+        self.sketch.begin_outline(instance.id, closed=closed, construction=construction)
         self.status_label.setText("Click outline vertices; Enter, double-click or right-click to finish. Backspace removes a point; Esc cancels.")
 
-    def _outline_finished(self, instance_id: str | None, points: list[QPointF], closed: bool) -> None:
+    def draw_circle(self) -> None:
+        instance = self._choose_sketch_instance("Sketch circle")
+        if instance is None:
+            return
+        self._set_tool(None)
+        self.sketch.begin_circle(instance.id)
+        self.status_label.setText("Click the circle center, then click a point on its radius. Esc cancels.")
+
+    def _circle_finished(self, instance_id: str, center: QPointF, radius: float,
+                         construction: bool) -> None:
+        instance = next((item for item in self.service.project.instances if item.id == instance_id), None)
+        if instance is None:
+            return
+        definition = next(d for d in self.service.project.definitions if d.id == instance.definition_id)
+        translation = self.sketch._translation(instance, definition)
+        row_y = self.sketch._part_rows.get(instance.id, 70.0)
+        circle_id = new_id("circle")
+        circle = SketchCircle(circle_id, f"Circle {len(definition.circles) + 1}",
+                              center.x() / SCALE - translation, (center.y() - row_y) / SCALE,
+                              radius / SCALE, construction=construction)
+        def change(project):
+            owner = next(d for d in project.definitions if d.id == definition.id)
+            owner.circles.append(circle)
+        if self._command(change, f"Added {circle.name}"):
+            self._select_entity("circle", f"{instance.id}:{definition.id}:{circle_id}")
+
+    def _outline_finished(self, instance_id: str | None, points: list[QPointF],
+                          closed: bool, construction: bool) -> None:
         if instance_id is None:
             name = self._pending_new_part_name or "Sketched part"
             self._pending_new_part_name = None
@@ -714,7 +872,8 @@ class MainWindow(QMainWindow):
         outline_id = new_id("outline")
         colors = ("#b95755", "#6d57b3", "#d5a800", "#38878a", "#547aaf")
         outline = Outline(outline_id, f"Outline {len(definition.outlines) + 1}", vertices,
-                          closed, colors[len(definition.outlines) % len(colors)])
+                          closed, "#378e89" if construction else colors[len(definition.outlines) % len(colors)],
+                          construction)
         def change(project):
             next(item for item in project.definitions if item.id == definition.id).outlines.append(outline)
         if self._command(change, "Added sketched outline"):
@@ -744,20 +903,31 @@ class MainWindow(QMainWindow):
         row_y = self.sketch._part_rows.get(instance.id, 70.0)
         translation = self.sketch._translation(instance, definition)
         # A nearby sketched vertex is a more reliable target than the raw click.
-        candidates = [(outline.id, index,
+        candidates = [("vertex", outline.id, index,
                        QPointF(self.sketch._vertex_x(instance, definition, vertex),
                                row_y + vertex.y * SCALE))
                       for outline in definition.outlines
                       for index, vertex in enumerate(outline.vertices)]
+        for circle in definition.circles:
+            face = next((item for item in definition.faces if item.id == circle.center_face_id), None)
+            cx = self.sketch._x(instance, face) if face is not None else (
+                translation + circle.x) * SCALE
+            candidates.append(("circle", circle.id, 0, QPointF(cx, row_y + circle.y * SCALE)))
         snapped_vertex = None
+        snapped_circle = None
         if candidates:
-            nearest = min(candidates, key=lambda item: (item[2].x()-point.x())**2 +
-                          (item[2].y()-point.y())**2)
-            if (nearest[2].x()-point.x())**2 + (nearest[2].y()-point.y())**2 <= 14**2:
-                snapped_vertex = (nearest[0], nearest[1])
-                point = nearest[2]
-                existing_outline = next(item for item in definition.outlines if item.id == nearest[0])
-                existing_face_id = existing_outline.vertices[nearest[1]].face_id
+            nearest = min(candidates, key=lambda item: (item[3].x()-point.x())**2 +
+                          (item[3].y()-point.y())**2)
+            if (nearest[3].x()-point.x())**2 + (nearest[3].y()-point.y())**2 <= 14**2:
+                point = nearest[3]
+                if nearest[0] == "vertex":
+                    snapped_vertex = (nearest[1], nearest[2])
+                    existing_outline = next(item for item in definition.outlines if item.id == nearest[1])
+                    existing_face_id = existing_outline.vertices[nearest[2]].face_id
+                else:
+                    snapped_circle = nearest[1]
+                    existing_circle = next(item for item in definition.circles if item.id == nearest[1])
+                    existing_face_id = existing_circle.center_face_id
                 if existing_face_id:
                     self._select_entity("face", f"{instance.id}:{existing_face_id}")
                     self.status_label.setText("Selected existing feature point")
@@ -777,6 +947,10 @@ class MainWindow(QMainWindow):
                 outline = next(item for item in owner.outlines if item.id == snapped_vertex[0])
                 outline.vertices[snapped_vertex[1]].face_id = face_id
                 outline.vertices[snapped_vertex[1]].x = x
+            if snapped_circle is not None:
+                circle = next(item for item in owner.circles if item.id == snapped_circle)
+                circle.center_face_id = face_id
+                circle.x = x
             project.dimensions.append(Dimension(dimension_id, f"{name.strip()} location",
                 FaceRef(instance.id, anchor.id), FaceRef(instance.id, face_id),
                 x - anchor.local_x, kind="basic"))
@@ -792,9 +966,9 @@ class MainWindow(QMainWindow):
         if kind == "face":
             instance_id = identifier.split(":", 1)[0]
             return self._entity("instance", instance_id)
-        if kind == "outline" and len(identifier.split(":")) == 3:
+        if kind in {"outline", "circle"} and len(identifier.split(":")) == 3:
             return self._entity("instance", identifier.split(":", 1)[0])
-        if kind in {"definition", "outline", "definition_face"}:
+        if kind in {"definition", "outline", "circle", "definition_face"}:
             definition_id = identifier.split(":", 1)[0]
             return next((instance for instance in self.service.project.instances
                          if instance.definition_id == definition_id), None)
@@ -848,17 +1022,81 @@ class MainWindow(QMainWindow):
         if self._command(change, f"Added centerline {name.strip()}"):
             self._select_entity("face", f"{instance_id}:{face_id}")
 
+    def add_sketch_constraint(self) -> None:
+        options = {
+            "Fix point": "fixed",
+            "Horizontal line": "horizontal",
+            "Vertical line": "vertical",
+            "Coincident points": "coincident",
+            "Parallel lines": "parallel",
+            "Perpendicular lines": "perpendicular",
+        }
+        choice, ok = QInputDialog.getItem(self, "Sketch constraint", "Constraint type:",
+                                           list(options), 0, False)
+        if not ok:
+            self._set_tool(None)
+            return
+        self._start_sketch_constraint(options[choice])
+
+    def _start_sketch_constraint(self, kind: str) -> None:
+        self._sketch_constraint_kind = kind
+        self._set_tool("sketch_constraint")
+
+    def _sketch_constraint_selection(self, pick: GeometryPick) -> None:
+        kind = self._sketch_constraint_kind
+        expected = "vertex" if kind in {"fixed", "coincident"} else "segment"
+        if pick.kind != expected:
+            self.status_label.setText(f"{kind.title()}: choose a {expected}")
+            return
+        if kind in {"fixed", "horizontal", "vertical"}:
+            self._set_tool(None)
+            self._create_sketch_constraint(kind, pick)
+            return
+        if not self._picked_geometry:
+            self._picked_geometry.append(pick)
+            self.sketch.set_dimension_picks([pick])
+            self.status_label.setText(f"{kind.title()}: choose the second {expected}")
+            return
+        first = self._picked_geometry[0]
+        if pick == first:
+            self.status_label.setText("Choose a different second feature")
+            return
+        if pick.instance_id != first.instance_id or pick.definition_id != first.definition_id:
+            self.status_label.setText("Both constrained features must belong to one part instance")
+            return
+        self._set_tool(None)
+        self._create_sketch_constraint(kind, first, pick)
+
+    def _create_sketch_constraint(self, kind: str, first: GeometryPick,
+                                  second: GeometryPick | None = None) -> None:
+        definition = next(d for d in self.service.project.definitions if d.id == first.definition_id)
+        x, y = vertex_point(definition, first) if kind == "fixed" else (None, None)
+        identifier = new_id("sketch-constraint")
+        name = f"{kind.title()} {len(self.service.project.sketch_constraints) + 1}"
+        item = SketchConstraint(identifier, name, first.definition_id, kind,
+                                first.outline_id, first.index,
+                                second.outline_id if second else None,
+                                second.index if second else None, x, y)
+        if self._command(lambda project: project.sketch_constraints.append(item),
+                         f"Added {kind} sketch constraint"):
+            self._select_entity("sketch_constraint", identifier)
+
     def _set_tool(self, tool: str | None) -> None:
         self.sketch.cancel_outline()
+        self.sketch.cancel_circle()
         self.sketch.cancel_pick_point()
         self._tool = tool
         self._picked_faces.clear()
         self._picked_geometry.clear()
-        self.sketch.set_dimension_mode(tool == "dimension")
-        for name, action in (("dimension", self.dimension_action), ("contact", self.contact_action), ("gap", self.gap_action)):
+        self.sketch.set_dimension_mode(tool in {"dimension", "sketch_constraint"})
+        for name, action in (("dimension", self.dimension_action),
+                             ("sketch_constraint", self.sketch_constraint_action),
+                             ("contact", self.contact_action), ("gap", self.gap_action)):
             action.setChecked(name == tool)
         if tool == "dimension":
-            self.status_label.setText("Dimension: click a line, two vertices, two parallel lines, or a vertex and centerline")
+            self.status_label.setText("Dimension: click a line, two vertices, two lines, a circle, or a vertex and centerline")
+        elif tool == "sketch_constraint":
+            self.status_label.setText(f"{self._sketch_constraint_kind.title()}: select the required sketch geometry")
         elif tool:
             self.status_label.setText(f"{tool.title()}: select the first face, then the second face")
         else:
@@ -870,6 +1108,9 @@ class MainWindow(QMainWindow):
             return
         if self._tool == "dimension":
             self._dimension_selection(reference)
+            return
+        if self._tool == "sketch_constraint":
+            self.status_label.setText("Select a sketch vertex or line for this constraint")
             return
         if reference in self._picked_faces:
             self.status_label.setText("Choose a different second face")
@@ -892,9 +1133,15 @@ class MainWindow(QMainWindow):
     def _geometry_clicked(self, pick: GeometryPick) -> None:
         if self._tool == "dimension":
             self._dimension_selection(pick)
+        elif self._tool == "sketch_constraint":
+            self._sketch_constraint_selection(pick)
 
     def _dimension_selection(self, pick: GeometryPick | FaceRef) -> None:
         if not self._picked_geometry:
+            if isinstance(pick, GeometryPick) and pick.kind == "circle":
+                self._set_tool(None)
+                self._create_geometry_dimension([pick])
+                return
             if isinstance(pick, GeometryPick) and pick.kind == "segment":
                 choice, ok = QInputDialog.getItem(
                     self, "Dimension line", "What should this line dimension measure?",
@@ -930,6 +1177,9 @@ class MainWindow(QMainWindow):
         definitions = {definition.id: definition for definition in project.definitions}
         if len(picks) == 1:
             segment = picks[0]
+            if segment.kind == "circle":
+                self._create_sketch_dimension("circle_diameter", segment)
+                return
             definition = definitions[segment.definition_id]
             a, b = segment_points(definition, segment)
             if abs(a[1] - b[1]) < 1e-6 and abs(a[0] - b[0]) > 1e-9:
@@ -959,8 +1209,8 @@ class MainWindow(QMainWindow):
         b = segment_points(definitions[second.definition_id], second)
         try:
             parallel_line_spacing(a, b)
-        except ValueError as exc:
-            self._error("Dimension between lines", exc)
+        except ValueError:
+            self._create_sketch_dimension("angle_between_lines", first, second)
             return
         vertical = abs(a[0][0] - a[1][0]) < 1e-6 and abs(b[0][0] - b[1][0]) < 1e-6
         if vertical and abs(a[0][0] - b[0][0]) > 1e-9:
@@ -986,7 +1236,8 @@ class MainWindow(QMainWindow):
                                   second.outline_id if second else None,
                                   second.index if second else None)
         measure.nominal = measure_sketch_dimension(definition, measure)
-        dialog = SketchDimensionDialog(measure.name, measure.nominal, self.service.project.unit,
+        dialog = SketchDimensionDialog(measure.name, measure.nominal,
+                                       "degrees" if kind == "angle_between_lines" else self.service.project.unit,
                                        parent=self)
         if dialog.exec() != QDialog.Accepted:
             return
@@ -1225,10 +1476,16 @@ class MainWindow(QMainWindow):
             self._edit_face(kind, identifier, entity)
         elif kind == "outline":
             self._edit_outline(identifier, entity)
+        elif kind == "circle":
+            self._edit_circle(identifier, entity)
         elif kind == "dimension":
             self._edit_dimension(entity)
         elif kind == "sketch_dimension":
             self._edit_sketch_dimension(entity)
+        elif kind == "sketch_constraint":
+            self._edit_sketch_constraint(entity)
+        elif kind == "parameter":
+            self._edit_parameter(entity)
         elif kind == "constraint":
             self._edit_constraint(entity)
         elif kind == "contact":
@@ -1270,8 +1527,30 @@ class MainWindow(QMainWindow):
             target.name = dialog.name.text().strip()
             target.vertices = vertices
             target.closed = dialog.closed.isChecked()
+            target.construction = dialog.construction.isChecked()
             target.color = dialog.color.text().strip()
         self._command(change, "Edited outline")
+
+    def _edit_circle(self, identifier: str, circle: SketchCircle) -> None:
+        definition_id, circle_id = identifier.split(":")[-2:]
+        dialog = CircleDialog(circle, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        def change(project):
+            owner = next(d for d in project.definitions if d.id == definition_id)
+            item = next(c for c in owner.circles if c.id == circle_id)
+            item.name = dialog.name.text().strip()
+            if item.center_face_id is None:
+                item.x = dialog.x.value()
+            item.y = dialog.y.value()
+            item.radius = dialog.radius.value()
+            item.color = dialog.color.text().strip()
+            item.construction = dialog.construction.isChecked()
+            for dimension in project.sketch_dimensions:
+                if (dimension.kind == "circle_diameter" and dimension.definition_id == definition_id and
+                    dimension.first_outline_id == circle_id and dimension.driving):
+                    dimension.nominal = 2 * item.radius
+        self._command(change, "Edited circle")
 
     @staticmethod
     def _face_in(project, kind, identifier):
@@ -1319,7 +1598,8 @@ class MainWindow(QMainWindow):
     def _edit_sketch_dimension(self, dimension: SketchDimension) -> None:
         definition = next(d for d in self.service.project.definitions if d.id == dimension.definition_id)
         current = measure_sketch_dimension(definition, dimension)
-        dialog = SketchDimensionDialog(dimension.name, current, self.service.project.unit,
+        dialog = SketchDimensionDialog(dimension.name, current,
+                                       "degrees" if dimension.kind == "angle_between_lines" else self.service.project.unit,
                                        driving=dimension.driving, parent=self)
         if dialog.exec() != QDialog.Accepted:
             return
@@ -1335,6 +1615,40 @@ class MainWindow(QMainWindow):
             else:
                 item.nominal = target
         self._command(change, "Edited sketch dimension")
+
+    def _edit_sketch_constraint(self, constraint: SketchConstraint) -> None:
+        dialog = SketchConstraintDialog(constraint, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        identifier = constraint.id
+        def change(project):
+            item = next(c for c in project.sketch_constraints if c.id == identifier)
+            item.name = dialog.name.text().strip()
+            if item.kind == "fixed":
+                item.x = dialog.x.value()
+                item.y = dialog.y.value()
+        self._command(change, "Edited sketch constraint")
+
+    def add_parameter(self) -> None:
+        dialog = ParameterDialog(f"P{len(self.service.project.parameters) + 1}", 0, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        identifier = new_id("parameter")
+        name, value = dialog.name.text().strip(), dialog.value.value()
+        if self._command(lambda project: project.parameters.append(Parameter(identifier, name, value)),
+                         f"Added parameter {name}"):
+            self._select_entity("parameter", identifier)
+
+    def _edit_parameter(self, parameter: Parameter) -> None:
+        dialog = ParameterDialog(parameter.name, parameter.nominal, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        identifier = parameter.id
+        def change(project):
+            item = next(p for p in project.parameters if p.id == identifier)
+            item.name = dialog.name.text().strip()
+            item.nominal = dialog.value.value()
+        self._command(change, "Edited parameter")
 
     def _edit_source(self, source) -> None:
         dialog = SourceDialog(source, self)
@@ -1469,6 +1783,7 @@ class MainWindow(QMainWindow):
             project.instances = [i for i in project.instances if i.id not in removed_instances]
             project.definitions = [d for d in project.definitions if d.id != identifier]
             project.sketch_dimensions = [d for d in project.sketch_dimensions if d.definition_id != identifier]
+            project.sketch_constraints = [c for c in project.sketch_constraints if c.definition_id != identifier]
         elif kind in {"face", "definition_face"}:
             owner_id, face_id = identifier.split(":", 1)
             if kind == "face":
@@ -1480,6 +1795,9 @@ class MainWindow(QMainWindow):
                 for vertex in outline.vertices:
                     if vertex.face_id == face_id:
                         vertex.face_id = None
+            for circle in definition.circles:
+                if circle.center_face_id == face_id:
+                    circle.center_face_id = None
         elif kind == "outline":
             definition_id, outline_id = identifier.split(":")[-2:]
             definition = next(d for d in project.definitions if d.id == definition_id)
@@ -1487,10 +1805,24 @@ class MainWindow(QMainWindow):
             project.sketch_dimensions = [d for d in project.sketch_dimensions
                                          if not (d.definition_id == definition_id and
                                                  outline_id in {d.first_outline_id, d.second_outline_id})]
+            project.sketch_constraints = [c for c in project.sketch_constraints
+                                          if not (c.definition_id == definition_id and
+                                                  outline_id in {c.first_outline_id, c.second_outline_id})]
+        elif kind == "circle":
+            definition_id, circle_id = identifier.split(":")[-2:]
+            definition = next(d for d in project.definitions if d.id == definition_id)
+            definition.circles = [item for item in definition.circles if item.id != circle_id]
+            project.sketch_dimensions = [d for d in project.sketch_dimensions
+                                         if not (d.definition_id == definition_id and
+                                                 d.first_outline_id == circle_id)]
         elif kind == "dimension":
             project.dimensions = [d for d in project.dimensions if d.id != identifier]
         elif kind == "sketch_dimension":
             project.sketch_dimensions = [d for d in project.sketch_dimensions if d.id != identifier]
+        elif kind == "sketch_constraint":
+            project.sketch_constraints = [c for c in project.sketch_constraints if c.id != identifier]
+        elif kind == "parameter":
+            project.parameters = [p for p in project.parameters if p.id != identifier]
         elif kind == "source":
             for dimension in project.dimensions:
                 if dimension.source_id == identifier:
@@ -1517,6 +1849,8 @@ class MainWindow(QMainWindow):
             valid_definitions = {d.id for d in project.definitions}
             project.sketch_dimensions = [d for d in project.sketch_dimensions
                                          if d.definition_id in valid_definitions]
+            project.sketch_constraints = [c for c in project.sketch_constraints
+                                          if c.definition_id in valid_definitions]
             def touches(ref):
                 return ref is not None and (ref.instance_id in removed_instances or
                                             (ref.instance_id, ref.face_id) in removed_faces)
